@@ -170,16 +170,25 @@ function markVisibleArea(cx, cy, radius = FOW_SIGHT_RADIUS) {
   }
 }
 
+/**
+ * Fog-of-war behavior:
+ * - Unexplored cells outside view radius stay fully hidden.
+ * - Explored cells remain revealed with a soft darkness when far away.
+ * - Nearby cells are fully visible for clear navigation.
+ */
 function getFogAlpha(wx, wy) {
   const dist = Math.hypot(wx - state.player.x, wy - state.player.y);
   const explored = state.explored[indexOf(wx, wy)] === 1;
 
-  if (!explored && dist > FOW_SIGHT_RADIUS) return 1;
   if (dist <= 1) return 0;
-  if (dist >= FOW_SIGHT_RADIUS) return 1;
+
+  if (dist >= FOW_SIGHT_RADIUS) {
+    return explored ? 0.42 : 1;
+  }
 
   const t = (dist - 1) / (FOW_SIGHT_RADIUS - 1);
-  return Math.min(1, Math.max(0, t ** 1.35));
+  const activeFog = Math.min(1, Math.max(0, t ** 1.35));
+  return explored ? activeFog * 0.45 : activeFog;
 }
 
 function coordNoise(x, y, seed) {
@@ -322,14 +331,16 @@ function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   const fixedTiles = state.zoom20x20 ? 20 : null;
-  const viewportCols = fixedTiles ?? (Math.ceil(canvas.width / TILE_SIZE) + 2);
-  const viewportRows = fixedTiles ?? (Math.ceil(canvas.height / TILE_SIZE) + 2);
+  // Keep visible tile count tight so player can stay centered unless clamped by world edges.
+  const viewportCols = fixedTiles ?? Math.ceil(canvas.width / TILE_SIZE);
+  const viewportRows = fixedTiles ?? Math.ceil(canvas.height / TILE_SIZE);
   const tileSize = fixedTiles ? Math.floor(Math.min(canvas.width, canvas.height) / fixedTiles) : TILE_SIZE;
   const boardWidthPx = viewportCols * tileSize;
   const boardHeightPx = viewportRows * tileSize;
   const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
+  // Camera centers on the player and only stops centering when we hit map boundaries.
   state.camera.x = Math.max(0, Math.min(WORLD_WIDTH - viewportCols, state.player.x - Math.floor(viewportCols / 2)));
   state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
 
