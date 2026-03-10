@@ -1,12 +1,13 @@
 name: Deploy Gold Digger to GitHub Pages
 
 on:
+  # Automatically deploy the static game whenever code is pushed.
+  # Using all branches ensures deployments still run even if the default
+  # branch name changes (for example: main/master/work).
   push:
-    branches:
-      - main
   workflow_dispatch:
 
-# Only allow one concurrent Pages deployment run for this workflow.
+# Only allow one in-flight Pages deployment at a time.
 concurrency:
   group: pages
   cancel-in-progress: true
