@@ -656,7 +656,6 @@ function movePlayer(dx, dy) {
   if (state.gameOver || state.digAction?.active) return;
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
-  state.lastMoveAt = now;
 
   const nx = state.player.x + dx;
   const ny = state.player.y + dy;
@@ -664,12 +663,23 @@ function movePlayer(dx, dy) {
 
   const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
   const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
-  if (!canDig(getCell(nx, ny), direction) && getCell(nx, ny) !== MATERIALS.EMPTY) {
+  const targetMaterial = getCell(nx, ny);
+
+  // Pure movement into empty space stays instant (no 3-second dig action).
+  if (targetMaterial === MATERIALS.EMPTY) {
+    state.lastMoveAt = now;
+    completeMove(nx, ny, dy, siteDef);
+    return;
+  }
+
+  if (!canDig(targetMaterial, direction)) {
     // Reuse existing error messages and blocked SFX for undiggable materials.
     digCell(nx, ny, direction, siteDef);
     return;
   }
 
+  // Only actual digging starts the timed 3-second mining action.
+  state.lastMoveAt = now;
   beginTimedDig(nx, ny, direction, siteDef);
 }
 
