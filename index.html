@@ -10,7 +10,7 @@
   <main class="game-shell" aria-label="Gold Digger retro game layout">
     <header class="top-bar">
       <h1>⛏️ Gold Digger</h1>
-      <p class="subtitle">Boulder Dash meets Bomber digging adventure</p>
+      <p class="subtitle">Massive 1000x1000 world dig - retro arcade style</p>
     </header>
 
     <section class="controls-panel" aria-label="Game controls and level selection">
@@ -19,7 +19,7 @@
         <select id="site-select" title="Choose where to dig for artifacts and treasure"></select>
       </div>
       <button id="start-btn" class="btn primary" title="Start or restart your selected dig site">Start Dig</button>
-      <button id="bomb-btn" class="btn" title="Place a bomb under your current position to break hard materials">💣 Bomb (<span id="bomb-count">0</span>)</button>
+      <button id="bomb-btn" class="btn" title="Blast nearby blocks below you">💣 Bomb (<span id="bomb-count">0</span>)</button>
       <button id="help-btn" class="btn" title="Show game tips and controls">❓ Help</button>
     </section>
 
@@ -27,19 +27,20 @@
       <div class="stat" title="Money earned from treasure and artifacts">💰 <span id="money">0</span></div>
       <div class="stat" title="Current player level">⭐ Level <span id="level">1</span></div>
       <div class="stat" title="Current XP progress">📈 XP <span id="xp">0</span>/<span id="xp-next">100</span></div>
-      <div class="stat" title="Remaining treasure on this map">🏺 Treasure <span id="treasure-left">0</span></div>
+      <div class="stat" title="Current depth reached in blocks">🧭 Depth <span id="depth">0</span></div>
       <div class="stat" title="Current dig speed multiplier">⚡ Speed x<span id="speed">1</span></div>
+      <div class="stat" title="Remaining bombs">💣 <span id="bombs">0</span></div>
     </section>
 
     <section class="play-area" aria-label="Game board and upgrade shop">
       <div class="board-wrap">
-        <canvas id="game-canvas" width="520" height="560" aria-label="Gold Digger grid board"></canvas>
-        <p class="legend">Use <kbd>← ↑ → ↓</kbd> or <kbd>WASD</kbd>. Dig only through sand at first, then upgrade!</p>
+        <canvas id="game-canvas" width="1200" height="700" aria-label="Gold Digger grid board"></canvas>
+        <p class="legend">Use <kbd>← ↑ → ↓</kbd> or <kbd>WASD</kbd>. The camera follows you as you dig deeper.</p>
       </div>
 
       <aside class="shop" aria-label="Upgrade shop">
         <h2>🛒 Miner Shop</h2>
-        <p class="shop-hint">Spend treasure money to become a legendary digger.</p>
+        <p class="shop-hint">Find treasure, upgrade tools, survive deeper layers.</p>
         <div id="shop-items"></div>
       </aside>
     </section>
@@ -50,12 +51,12 @@
   <dialog id="help-dialog">
     <h3>How to Play Gold Digger</h3>
     <ul>
-      <li>Start at the top and dig through <strong>sand</strong> blocks.</li>
-      <li>Digging sideways can make loose sand above fall down.</li>
-      <li><strong>Rock</strong> blocks need Rock Drill upgrade.</li>
-      <li><strong>Metal</strong> and <strong>Granite</strong> require bombs.</li>
-      <li>Collect treasure to earn money, XP, and unlock tougher sites.</li>
-      <li>Buy tools to dig faster, create wider tunnels, and carry more bombs.</li>
+      <li>This map is <strong>1000x1000 blocks</strong> and rendered with smooth camera scrolling.</li>
+      <li>Start at the top and dig through <strong>sand</strong> to go deeper.</li>
+      <li>Digging sideways can destabilize columns and make blocks fall.</li>
+      <li><strong>Rock</strong> needs Rock Drill. <strong>Metal/Granite</strong> are best handled with bombs.</li>
+      <li>Collect treasure for money + XP and buy upgrades.</li>
+      <li>Press <kbd>Space</kbd> to use a bomb.</li>
     </ul>
     <button id="close-help" class="btn primary">Got it</button>
   </dialog>
