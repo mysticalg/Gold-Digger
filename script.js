@@ -16,6 +16,7 @@ const MATERIALS = {
   METAL: 3,
   GRANITE: 4,
   TREASURE: 5,
+  GRASS: 6,
 };
 
 const SITE_DEFS = [
@@ -152,10 +153,9 @@ function coordNoise(x, y, seed) {
 /**
  * Build a 1000x1000 world.
  * Material profile by depth:
- * - upper crust: mostly sand with rising rock
- * - mid crust: transitions to almost all rock
- * - deep crust: all rock baseline
- * - deep core: introduces metal then granite pockets
+ * - y=0: above-ground walking lane (air)
+ * - y=1: grass entry strip to break through
+ * - deeper: sand -> rock -> hard substances
  */
 function buildWorld(siteDef) {
   const seed = SITE_DEFS.findIndex((s) => s.id === siteDef.id) + 1;
@@ -166,43 +166,51 @@ function buildWorld(siteDef) {
     for (let x = 0; x < WORLD_WIDTH; x += 1) {
       const idx = indexOf(x, y);
 
+      // Surface lane: player can walk horizontally to pick a starting dig column.
       if (y === 0) {
         world[idx] = MATERIALS.EMPTY;
         continue;
       }
 
+      // First layer under surface is always grass so digging starts naturally.
+      if (y === 1) {
+        world[idx] = MATERIALS.GRASS;
+        continue;
+      }
+
+      const undergroundDepth = (y - 2) / (WORLD_HEIGHT - 2);
       const n = coordNoise(x, y, seed);
       const deepNoise = coordNoise(x + 99991, y + 31337, seed + 17);
 
       // Treasure becomes slightly rarer at extreme depth where hard materials dominate.
-      const treasureChance = Math.max(0.004, siteDef.treasureBias - (depth * 0.006));
+      const treasureChance = Math.max(0.004, siteDef.treasureBias - (undergroundDepth * 0.006));
       if (n < treasureChance) {
         world[idx] = MATERIALS.TREASURE;
         continue;
       }
 
       // 0.00 -> 0.35: sand to rock ramp.
-      if (depth < 0.35) {
-        const rockRatio = Math.min(1, siteDef.rockBias + (depth / 0.35) * 0.9);
+      if (undergroundDepth < 0.35) {
+        const rockRatio = Math.min(1, siteDef.rockBias + (undergroundDepth / 0.35) * 0.9);
         world[idx] = deepNoise < rockRatio ? MATERIALS.ROCK : MATERIALS.SAND;
         continue;
       }
 
       // 0.35 -> 0.65: all rock band.
-      if (depth < 0.65) {
+      if (undergroundDepth < 0.65) {
         world[idx] = MATERIALS.ROCK;
         continue;
       }
 
       // 0.65 -> 0.85: rock + metal pockets.
-      if (depth < 0.85) {
-        const metalChance = siteDef.metalBias + ((depth - 0.65) / 0.2) * 0.24;
+      if (undergroundDepth < 0.85) {
+        const metalChance = siteDef.metalBias + ((undergroundDepth - 0.65) / 0.2) * 0.24;
         world[idx] = deepNoise < metalChance ? MATERIALS.METAL : MATERIALS.ROCK;
         continue;
       }
 
       // 0.85 -> 1.00: core with granite and heavy metal mixed into rock.
-      const graniteChance = siteDef.graniteBias + ((depth - 0.85) / 0.15) * 0.35;
+      const graniteChance = siteDef.graniteBias + ((undergroundDepth - 0.85) / 0.15) * 0.35;
       const metalChance = siteDef.metalBias + 0.18;
       if (deepNoise < graniteChance) world[idx] = MATERIALS.GRANITE;
       else if (deepNoise < graniteChance + metalChance) world[idx] = MATERIALS.METAL;
@@ -220,6 +228,7 @@ function getMaterialColor(type) {
     case MATERIALS.METAL: return '#adb7cc';
     case MATERIALS.GRANITE: return '#525565';
     case MATERIALS.TREASURE: return '#f3c741';
+    case MATERIALS.GRASS: return '#4aa34a';
     default: return '#0f1320';
   }
 }
@@ -366,7 +375,7 @@ function updateHud() {
 }
 
 function canDig(material, direction) {
-  if (material === MATERIALS.EMPTY || material === MATERIALS.SAND || material === MATERIALS.TREASURE) return true;
+  if (material === MATERIALS.EMPTY || material === MATERIALS.SAND || material === MATERIALS.TREASURE || material === MATERIALS.GRASS) return true;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
   return false;
