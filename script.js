@@ -44,6 +44,10 @@ const state = {
   selectedSiteId: SITE_DEFS[0].id,
   maxDepth: 0,
   zoom20x20: false,
+  gameOver: false,
+  sfxEnabled: true,
+  particles: [],
+  playerAnim: { bobPhase: 0, facing: 1 },
 };
 
 const upgrades = [
@@ -92,6 +96,7 @@ const canvas = $('game-canvas');
 const ctx = canvas.getContext('2d');
 const siteSelect = $('site-select');
 const messageBox = $('message');
+let audioCtx;
 
 function indexOf(x, y) {
   return (y * WORLD_WIDTH) + x;
@@ -110,6 +115,50 @@ function setCell(x, y, value) {
   if (inBounds(x, y)) state.world[indexOf(x, y)] = value;
 }
 
+/**
+ * Tiny synthesized retro SFX system.
+ * Uses WebAudio oscillators so no network/audio assets are needed.
+ */
+function playTone(type = 'triangle', freq = 440, duration = 0.08, volume = 0.03, slideTo = freq) {
+  if (!state.sfxEnabled) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return;
+  if (!audioCtx) audioCtx = new Ctx();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, now);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(30, slideTo), now + duration);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + duration + 0.01);
+}
+
+function playSfx(name) {
+  if (name === 'dig') playTone('square', 180, 0.05, 0.025, 130);
+  if (name === 'treasure') {
+    playTone('triangle', 520, 0.08, 0.04, 780);
+    setTimeout(() => playTone('triangle', 780, 0.07, 0.035, 1040), 70);
+  }
+  if (name === 'bomb') {
+    playTone('sawtooth', 260, 0.16, 0.05, 52);
+    setTimeout(() => playTone('square', 120, 0.14, 0.03, 48), 30);
+  }
+  if (name === 'blocked') playTone('square', 120, 0.06, 0.02, 90);
+  if (name === 'levelup') playTone('triangle', 410, 0.1, 0.04, 920);
+  if (name === 'gameover') {
+    playTone('sawtooth', 220, 0.2, 0.04, 95);
+    setTimeout(() => playTone('triangle', 160, 0.18, 0.03, 70), 120);
+  }
+}
+
 /** Mark cells around the player as explored for fog-of-war tracking. */
 function markVisibleArea(cx, cy, radius = FOW_SIGHT_RADIUS) {
   for (let y = cy - radius; y <= cy + radius; y += 1) {
@@ -122,27 +171,26 @@ function markVisibleArea(cx, cy, radius = FOW_SIGHT_RADIUS) {
 }
 
 /**
- * Returns fog alpha for a world cell based on distance from player and explored state.
- *  - near the player: fully visible
- *  - smoothly fades over distance
- *  - radius edge and beyond: black (not visible)
+ * Fog-of-war behavior:
+ * - Unexplored cells outside view radius stay fully hidden.
+ * - Explored cells remain revealed with a soft darkness when far away.
+ * - Nearby cells are fully visible for clear navigation.
  */
 function getFogAlpha(wx, wy) {
   const dist = Math.hypot(wx - state.player.x, wy - state.player.y);
   const explored = state.explored[indexOf(wx, wy)] === 1;
 
-  if (!explored && dist > FOW_SIGHT_RADIUS) return 1;
   if (dist <= 1) return 0;
-  if (dist >= FOW_SIGHT_RADIUS) return 1;
+
+  if (dist >= FOW_SIGHT_RADIUS) {
+    return explored ? 0.42 : 1;
+  }
 
   const t = (dist - 1) / (FOW_SIGHT_RADIUS - 1);
-  return Math.min(1, Math.max(0, t ** 1.35));
+  const activeFog = Math.min(1, Math.max(0, t ** 1.35));
+  return explored ? activeFog * 0.45 : activeFog;
 }
 
-/**
- * Fast deterministic noise for map generation.
- * Keeps generation reproducible per-site without expensive random state churn.
- */
 function coordNoise(x, y, seed) {
   let h = (x * 374761393) ^ (y * 668265263) ^ (seed * 2147483647);
   h = (h ^ (h >> 13)) * 1274126177;
@@ -150,29 +198,19 @@ function coordNoise(x, y, seed) {
   return (h >>> 0) / 4294967295;
 }
 
-/**
- * Build a 1000x1000 world.
- * Material profile by depth:
- * - y=0: above-ground walking lane (air)
- * - y=1: grass entry strip to break through
- * - deeper: sand -> rock -> hard substances
- */
 function buildWorld(siteDef) {
   const seed = SITE_DEFS.findIndex((s) => s.id === siteDef.id) + 1;
   const world = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
 
   for (let y = 0; y < WORLD_HEIGHT; y += 1) {
-    const depth = y / WORLD_HEIGHT;
     for (let x = 0; x < WORLD_WIDTH; x += 1) {
       const idx = indexOf(x, y);
 
-      // Surface lane: player can walk horizontally to pick a starting dig column.
       if (y === 0) {
         world[idx] = MATERIALS.EMPTY;
         continue;
       }
 
-      // First layer under surface is always grass so digging starts naturally.
       if (y === 1) {
         world[idx] = MATERIALS.GRASS;
         continue;
@@ -182,34 +220,29 @@ function buildWorld(siteDef) {
       const n = coordNoise(x, y, seed);
       const deepNoise = coordNoise(x + 99991, y + 31337, seed + 17);
 
-      // Treasure becomes slightly rarer at extreme depth where hard materials dominate.
       const treasureChance = Math.max(0.004, siteDef.treasureBias - (undergroundDepth * 0.006));
       if (n < treasureChance) {
         world[idx] = MATERIALS.TREASURE;
         continue;
       }
 
-      // 0.00 -> 0.35: sand to rock ramp.
       if (undergroundDepth < 0.35) {
         const rockRatio = Math.min(1, siteDef.rockBias + (undergroundDepth / 0.35) * 0.9);
         world[idx] = deepNoise < rockRatio ? MATERIALS.ROCK : MATERIALS.SAND;
         continue;
       }
 
-      // 0.35 -> 0.65: all rock band.
       if (undergroundDepth < 0.65) {
         world[idx] = MATERIALS.ROCK;
         continue;
       }
 
-      // 0.65 -> 0.85: rock + metal pockets.
       if (undergroundDepth < 0.85) {
         const metalChance = siteDef.metalBias + ((undergroundDepth - 0.65) / 0.2) * 0.24;
         world[idx] = deepNoise < metalChance ? MATERIALS.METAL : MATERIALS.ROCK;
         continue;
       }
 
-      // 0.85 -> 1.00: core with granite and heavy metal mixed into rock.
       const graniteChance = siteDef.graniteBias + ((undergroundDepth - 0.85) / 0.15) * 0.35;
       const metalChance = siteDef.metalBias + 0.18;
       if (deepNoise < graniteChance) world[idx] = MATERIALS.GRANITE;
@@ -233,12 +266,11 @@ function getMaterialColor(type) {
   }
 }
 
-/** Keep internal canvas pixels synced to displayed size. */
 function resizeCanvasToDisplaySize() {
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(600, Math.floor(rect.width * dpr));
-  const height = Math.max(420, Math.floor(rect.height * dpr));
+  const width = Math.max(360, Math.floor(rect.width * dpr));
+  const height = Math.max(280, Math.floor(rect.height * dpr));
 
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
@@ -247,14 +279,15 @@ function resizeCanvasToDisplaySize() {
 }
 
 function drawSurface() {
-  const horizon = Math.max(60, Math.floor(canvas.height * 0.16));
+  const horizon = Math.max(42, Math.floor(canvas.height * 0.16));
   const sky = ctx.createLinearGradient(0, 0, 0, horizon);
   sky.addColorStop(0, '#78c8ff');
   sky.addColorStop(1, '#bce9ff');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, canvas.width, horizon);
 
-  ctx.fillStyle = 'rgba(255, 225, 91, 0.4)';
+  const pulse = 0.08 * Math.sin(performance.now() / 620);
+  ctx.fillStyle = `rgba(255, 225, 91, ${0.35 + pulse})`;
   ctx.beginPath();
   ctx.arc(canvas.width - 95, 70, 48, 0, Math.PI * 2);
   ctx.fill();
@@ -267,31 +300,56 @@ function drawSurface() {
   ctx.fillRect(0, horizon - 10, canvas.width, 10);
 }
 
-/**
- * Camera follows player downward through the giant world.
- * Rendering draws only visible tiles so 1,000,000 blocks stay performant.
- */
+/** Particle bursts make digs, treasure, and bombs feel responsive. */
+function spawnParticles(worldX, worldY, color, count = 8, force = 1) {
+  for (let i = 0; i < count; i += 1) {
+    state.particles.push({
+      x: worldX + 0.5,
+      y: worldY + 0.5,
+      vx: (Math.random() - 0.5) * 0.16 * force,
+      vy: (-Math.random() * 0.16) * force,
+      life: 1,
+      color,
+      size: 0.12 + Math.random() * 0.2,
+    });
+  }
+}
+
+function updateParticles() {
+  for (let i = state.particles.length - 1; i >= 0; i -= 1) {
+    const p = state.particles[i];
+    p.life -= 0.06;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.008;
+    if (p.life <= 0) state.particles.splice(i, 1);
+  }
+}
+
 function draw() {
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Zoom mode can lock the camera to a tactical 20x20 tile view.
   const fixedTiles = state.zoom20x20 ? 20 : null;
-  const viewportCols = fixedTiles ?? (Math.ceil(canvas.width / TILE_SIZE) + 2);
-  const viewportRows = fixedTiles ?? (Math.ceil(canvas.height / TILE_SIZE) + 2);
+  // Keep visible tile count tight so player can stay centered unless clamped by world edges.
+  const viewportCols = fixedTiles ?? Math.ceil(canvas.width / TILE_SIZE);
+  const viewportRows = fixedTiles ?? Math.ceil(canvas.height / TILE_SIZE);
   const tileSize = fixedTiles ? Math.floor(Math.min(canvas.width, canvas.height) / fixedTiles) : TILE_SIZE;
   const boardWidthPx = viewportCols * tileSize;
   const boardHeightPx = viewportRows * tileSize;
   const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
+  // Camera centers on the player and only stops centering when we hit map boundaries.
   state.camera.x = Math.max(0, Math.min(WORLD_WIDTH - viewportCols, state.player.x - Math.floor(viewportCols / 2)));
   state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
 
   drawSurface();
 
-  // Backplate helps visualize the exact zoomed 20x20 region.
-  ctx.fillStyle = '#19111a';
+  const boardGlow = ctx.createLinearGradient(offsetX, offsetY, offsetX, offsetY + boardHeightPx);
+  boardGlow.addColorStop(0, '#24172e');
+  boardGlow.addColorStop(1, '#141622');
+  ctx.fillStyle = boardGlow;
   ctx.fillRect(offsetX - 2, offsetY - 2, boardWidthPx + 4, boardHeightPx + 4);
 
   for (let vy = 0; vy < viewportRows; vy += 1) {
@@ -313,12 +371,12 @@ function draw() {
       }
 
       if (material === MATERIALS.TREASURE) {
-        const gemSize = Math.max(4, Math.floor(tileSize * 0.38));
+        const twinkle = (Math.sin((performance.now() / 220) + ((wx + wy) * 0.3)) + 1) / 2;
+        const gemSize = Math.max(4, Math.floor(tileSize * (0.28 + twinkle * 0.14)));
         ctx.fillStyle = '#5d4300';
         ctx.fillRect(px + Math.floor((tileSize - gemSize) / 2), py + Math.floor((tileSize - gemSize) / 2), gemSize, gemSize);
       }
 
-      // Fog of war: smooth falloff over a 5-tile sight radius.
       const fogAlpha = getFogAlpha(wx, wy);
       if (fogAlpha > 0) {
         ctx.fillStyle = `rgba(0, 0, 0, ${fogAlpha.toFixed(3)})`;
@@ -330,21 +388,46 @@ function draw() {
     }
   }
 
-  // Player sprite in screen coordinates (scaled to current zoom tile size).
+  updateParticles();
+  for (const p of state.particles) {
+    const sx = offsetX + ((p.x - state.camera.x) * tileSize);
+    const sy = offsetY + ((p.y - state.camera.y) * tileSize);
+    const size = Math.max(1, Math.floor(tileSize * p.size));
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillRect(sx, sy, size, size);
+    ctx.globalAlpha = 1;
+  }
+
   const playerScreenX = offsetX + ((state.player.x - state.camera.x) * tileSize);
   const playerScreenY = offsetY + ((state.player.y - state.camera.y) * tileSize);
+  const bob = Math.sin(state.playerAnim.bobPhase) * Math.max(1, tileSize * 0.05);
+  const px = playerScreenX;
+  const py = playerScreenY + bob;
+
   ctx.fillStyle = '#f9c232';
-  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.2), playerScreenY + 1, Math.max(6, Math.floor(tileSize * 0.62)), Math.max(3, Math.floor(tileSize * 0.25)));
+  ctx.fillRect(px + Math.floor(tileSize * 0.2), py + 1, Math.max(6, Math.floor(tileSize * 0.62)), Math.max(3, Math.floor(tileSize * 0.25)));
   ctx.fillStyle = '#ffd8ab';
-  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.3), playerScreenY + Math.floor(tileSize * 0.3), Math.max(4, Math.floor(tileSize * 0.38)), Math.max(3, Math.floor(tileSize * 0.22)));
+  ctx.fillRect(px + Math.floor(tileSize * 0.3), py + Math.floor(tileSize * 0.3), Math.max(4, Math.floor(tileSize * 0.38)), Math.max(3, Math.floor(tileSize * 0.22)));
   ctx.fillStyle = '#2a5daa';
-  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.25), playerScreenY + Math.floor(tileSize * 0.54), Math.max(5, Math.floor(tileSize * 0.5)), Math.max(4, Math.floor(tileSize * 0.31)));
+  ctx.fillRect(px + Math.floor(tileSize * 0.25), py + Math.floor(tileSize * 0.54), Math.max(5, Math.floor(tileSize * 0.5)), Math.max(4, Math.floor(tileSize * 0.31)));
   ctx.fillStyle = '#9ea9c4';
-  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.74), playerScreenY + Math.floor(tileSize * 0.54), Math.max(2, Math.floor(tileSize * 0.16)), Math.max(4, Math.floor(tileSize * 0.38)));
+  const pickOffset = state.playerAnim.facing > 0 ? 0.74 : 0.08;
+  ctx.fillRect(px + Math.floor(tileSize * pickOffset), py + Math.floor(tileSize * 0.54), Math.max(2, Math.floor(tileSize * 0.16)), Math.max(4, Math.floor(tileSize * 0.38)));
+
+  if (state.gameOver) {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(offsetX, offsetY, boardWidthPx, boardHeightPx);
+    ctx.fillStyle = '#ff5f73';
+    ctx.font = `bold ${Math.max(18, Math.floor(tileSize * 1.1))}px Trebuchet MS`;
+    ctx.textAlign = 'center';
+    ctx.fillText('TRAPPED! GAME OVER', offsetX + (boardWidthPx / 2), offsetY + (boardHeightPx / 2));
+  }
 }
 
-function setMessage(msg) {
+function setMessage(msg, tone = 'good') {
   messageBox.textContent = msg;
+  messageBox.classList.toggle('is-danger', tone === 'danger');
 }
 
 function xpToNextLevel() {
@@ -357,6 +440,7 @@ function gainXp(amount) {
     state.xp -= xpToNextLevel();
     state.level += 1;
     state.money += 45;
+    playSfx('levelup');
     setMessage(`Level up! You are now level ${state.level}. +$45 sponsor bonus.`);
   }
 }
@@ -372,6 +456,9 @@ function updateHud() {
   $('bombs').textContent = state.bombs;
   $('zoom-mode').textContent = state.zoom20x20 ? '20x20' : 'Auto';
   $('zoom-btn').textContent = state.zoom20x20 ? '🔍 Zoom: 20x20' : '🔍 Zoom: Auto';
+  $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
+  $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
+  $('status').textContent = state.gameOver ? 'Game Over' : 'Active';
 }
 
 function canDig(material, direction) {
@@ -382,7 +469,6 @@ function canDig(material, direction) {
 }
 
 function settleColumn(x) {
-  // Column-local gravity for performance: O(height) on one column per move.
   for (let y = WORLD_HEIGHT - 2; y >= 0; y -= 1) {
     const curr = getCell(x, y);
     if (curr === MATERIALS.EMPTY) continue;
@@ -393,10 +479,12 @@ function settleColumn(x) {
   }
 }
 
-function collectTreasure(siteDef) {
+function collectTreasure(siteDef, x, y) {
   const payout = 45 + Math.floor(Math.random() * 50);
   state.money += payout;
   gainXp(26 * siteDef.xpBonus);
+  spawnParticles(x, y, '#ffdf55', 14, 1.2);
+  playSfx('treasure');
   setMessage(`Treasure found! +$${payout}`);
 }
 
@@ -405,20 +493,54 @@ function digCell(x, y, direction, siteDef) {
   const material = getCell(x, y);
 
   if (!canDig(material, direction)) {
-    if (material === MATERIALS.ROCK) setMessage('Rock Drill upgrade required for this block.');
-    if (material === MATERIALS.METAL || material === MATERIALS.GRANITE) setMessage('Too hard to dig. Use a bomb!');
+    if (material === MATERIALS.ROCK) setMessage('Rock Drill upgrade required for this block.', 'danger');
+    if (material === MATERIALS.METAL || material === MATERIALS.GRANITE) setMessage('Too hard to dig. Use a bomb!', 'danger');
+    playSfx('blocked');
     return false;
   }
 
-  if (material === MATERIALS.TREASURE) collectTreasure(siteDef);
+  if (material === MATERIALS.TREASURE) collectTreasure(siteDef, x, y);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
+    spawnParticles(x, y, getMaterialColor(material), 6, 0.8);
+    playSfx('dig');
     gainXp(7 * siteDef.xpBonus);
   }
   return true;
 }
 
+/**
+ * Detect a trap state: no legal movement in 4-neighborhood and no bombs.
+ * This makes being fully boxed by hard blocks a lose condition.
+ */
+function isTrapped() {
+  if (state.bombs > 0) return false;
+  const directions = [
+    { dx: 0, dy: -1, name: 'up' },
+    { dx: 0, dy: 1, name: 'down' },
+    { dx: -1, dy: 0, name: 'side' },
+    { dx: 1, dy: 0, name: 'side' },
+  ];
+
+  return !directions.some((dir) => {
+    const nx = state.player.x + dir.dx;
+    const ny = state.player.y + dir.dy;
+    if (!inBounds(nx, ny)) return false;
+    const material = getCell(nx, ny);
+    return canDig(material, dir.name) || material === MATERIALS.EMPTY || material === MATERIALS.TREASURE;
+  });
+}
+
+function endGameFromTrap() {
+  state.gameOver = true;
+  playSfx('gameover');
+  setMessage('You are trapped with no escape path or bombs left. Game over! Press Start Dig to restart.', 'danger');
+  updateHud();
+  draw();
+}
+
 function movePlayer(dx, dy) {
+  if (state.gameOver) return;
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
   state.lastMoveAt = now;
@@ -427,10 +549,12 @@ function movePlayer(dx, dy) {
   const ny = state.player.y + dy;
   if (!inBounds(nx, ny)) return;
 
-  const siteDef = SITE_DEFS.find((s) => s.id === state.selectedSiteId);
+  const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
   const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
   if (!digCell(nx, ny, direction, siteDef)) return;
 
+  state.playerAnim.bobPhase += 0.85;
+  state.playerAnim.facing = dx < 0 ? -1 : dx > 0 ? 1 : state.playerAnim.facing;
   state.player.x = nx;
   state.player.y = ny;
   state.maxDepth = Math.max(state.maxDepth, ny);
@@ -444,11 +568,15 @@ function movePlayer(dx, dy) {
   settleColumn(state.player.x);
   updateHud();
   draw();
+
+  if (isTrapped()) endGameFromTrap();
 }
 
 function useBomb() {
+  if (state.gameOver) return;
   if (state.bombs <= 0) {
-    setMessage('Out of bombs. Buy Bomb Pack in the shop.');
+    setMessage('Out of bombs. Buy Bomb Pack in the shop.', 'danger');
+    playSfx('blocked');
     return;
   }
 
@@ -459,12 +587,14 @@ function useBomb() {
     for (let x = originX - 1; x <= originX + 1; x += 1) {
       if (!inBounds(x, y)) continue;
       setCell(x, y, MATERIALS.EMPTY);
+      spawnParticles(x, y, '#ff9466', 8, 1.6);
       settleColumn(x);
     }
   }
 
   state.bombs -= 1;
   gainXp(20);
+  playSfx('bomb');
   setMessage('Boom! Area cleared.');
   updateHud();
   draw();
@@ -490,9 +620,9 @@ function renderShop() {
     btn.className = 'btn';
     btn.title = `Buy ${upgrade.name}`;
     btn.textContent = 'Buy Upgrade';
-    btn.disabled = state.money < cost;
+    btn.disabled = state.money < cost || state.gameOver;
     btn.addEventListener('click', () => {
-      if (state.money < cost) return;
+      if (state.money < cost || state.gameOver) return;
       state.money -= cost;
       upgrade.apply();
       setMessage(`${upgrade.name} purchased.`);
@@ -507,16 +637,17 @@ function renderShop() {
 }
 
 function startSelectedSite() {
-  const siteDef = SITE_DEFS.find((s) => s.id === state.selectedSiteId);
+  const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
   setMessage('Generating 1000x1000 world...');
 
-  // Small timeout gives browser a frame to paint message before generation loop starts.
   setTimeout(() => {
     state.world = buildWorld(siteDef);
     state.explored = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
     state.player = { x: Math.floor(WORLD_WIDTH / 2), y: 0 };
     state.camera = { x: 0, y: 0 };
     state.maxDepth = 0;
+    state.gameOver = false;
+    state.particles = [];
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
     updateHud();
@@ -545,6 +676,10 @@ function bindUi() {
     updateHud();
     draw();
   });
+  $('sfx-btn').addEventListener('click', () => {
+    state.sfxEnabled = !state.sfxEnabled;
+    updateHud();
+  });
 
   const helpDialog = $('help-dialog');
   $('help-btn').addEventListener('click', () => helpDialog.showModal());
@@ -565,9 +700,20 @@ function bindUi() {
       updateHud();
       draw();
     }
+    if (key === 'm') {
+      state.sfxEnabled = !state.sfxEnabled;
+      updateHud();
+    }
   });
 
   window.addEventListener('resize', draw);
+
+  // Continuous redraw keeps lightweight animations smooth.
+  const loop = () => {
+    draw();
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
 }
 
 bindUi();
