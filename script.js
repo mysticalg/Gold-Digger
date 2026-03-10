@@ -6,7 +6,11 @@
  * - Treasure economy, XP/levels, and site progression
  */
 const GRID_SIZE = 10;
-const TILE_SIZE = 50;
+const TILE_SIZE = 25;
+const BOARD_OFFSET_X = 135;
+const BOARD_OFFSET_Y = 295;
+const BOARD_WIDTH = GRID_SIZE * TILE_SIZE;
+const BOARD_HEIGHT = GRID_SIZE * TILE_SIZE;
 
 const MATERIALS = {
   EMPTY: 'empty',
@@ -110,27 +114,85 @@ function getMaterialColor(type) {
   }
 }
 
+/**
+ * Draw bright above-ground scenery so the start point feels like a real dig site.
+ * Includes sky, sun, grass strip, and simple pixel trees.
+ */
+function drawSurfaceScene() {
+  const skyGradient = ctx.createLinearGradient(0, 0, 0, BOARD_OFFSET_Y - 20);
+  skyGradient.addColorStop(0, '#8bd2ff');
+  skyGradient.addColorStop(1, '#bdeaff');
+  ctx.fillStyle = skyGradient;
+  ctx.fillRect(0, 0, canvas.width, BOARD_OFFSET_Y - 20);
+
+  // Sun with a subtle glow.
+  ctx.fillStyle = 'rgba(255, 222, 89, 0.35)';
+  ctx.beginPath();
+  ctx.arc(430, 72, 42, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffdf4f';
+  ctx.beginPath();
+  ctx.arc(430, 72, 26, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Distant hill line.
+  ctx.fillStyle = '#79bb69';
+  ctx.beginPath();
+  ctx.moveTo(0, 240);
+  ctx.quadraticCurveTo(130, 200, 260, 235);
+  ctx.quadraticCurveTo(390, 270, 520, 220);
+  ctx.lineTo(520, BOARD_OFFSET_Y - 20);
+  ctx.lineTo(0, BOARD_OFFSET_Y - 20);
+  ctx.closePath();
+  ctx.fill();
+
+  // Grass strip where the miner stands before digging down.
+  ctx.fillStyle = '#2e8e3f';
+  ctx.fillRect(0, BOARD_OFFSET_Y - 28, canvas.width, 28);
+
+  // Pixel trees for environmental flavor.
+  const trees = [
+    { x: 48, y: 184, scale: 1 },
+    { x: 88, y: 174, scale: 0.8 },
+    { x: 478, y: 188, scale: 1.05 },
+  ];
+  for (const tree of trees) {
+    const trunkW = 10 * tree.scale;
+    const trunkH = 34 * tree.scale;
+    ctx.fillStyle = '#6a4325';
+    ctx.fillRect(tree.x - trunkW / 2, tree.y, trunkW, trunkH);
+    ctx.fillStyle = '#2fb25f';
+    ctx.fillRect(tree.x - 19 * tree.scale, tree.y - 20 * tree.scale, 38 * tree.scale, 18 * tree.scale);
+    ctx.fillRect(tree.x - 14 * tree.scale, tree.y - 36 * tree.scale, 28 * tree.scale, 18 * tree.scale);
+  }
+}
+
 /** Render pixel-style board and player sprite. */
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawSurfaceScene();
+
+  // Draw bordered underground playfield.
+  ctx.fillStyle = '#251c10';
+  ctx.fillRect(BOARD_OFFSET_X - 4, BOARD_OFFSET_Y - 4, BOARD_WIDTH + 8, BOARD_HEIGHT + 8);
 
   for (let y = 0; y < GRID_SIZE; y += 1) {
     for (let x = 0; x < GRID_SIZE; x += 1) {
       const type = state.board[y][x];
-      const px = x * TILE_SIZE;
-      const py = y * TILE_SIZE;
+      const px = BOARD_OFFSET_X + (x * TILE_SIZE);
+      const py = BOARD_OFFSET_Y + (y * TILE_SIZE);
 
       ctx.fillStyle = getMaterialColor(type);
       ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
 
       if (type !== MATERIALS.EMPTY) {
         ctx.fillStyle = 'rgba(0,0,0,0.2)';
-        ctx.fillRect(px + 4, py + 4, TILE_SIZE - 8, 5);
+        ctx.fillRect(px + 3, py + 3, TILE_SIZE - 6, 4);
       }
 
       if (type === MATERIALS.TREASURE) {
         ctx.fillStyle = '#5d4300';
-        ctx.fillRect(px + 16, py + 16, 18, 18);
+        ctx.fillRect(px + 7, py + 7, 11, 11);
       }
 
       ctx.strokeStyle = '#0d1020';
@@ -139,16 +201,22 @@ function draw() {
   }
 
   const { x, y } = state.player;
-  const px = x * TILE_SIZE;
-  const py = y * TILE_SIZE;
+  const px = BOARD_OFFSET_X + (x * TILE_SIZE);
+  const py = BOARD_OFFSET_Y + (y * TILE_SIZE);
 
-  // Retro digger character.
-  ctx.fillStyle = '#ff5a5a';
-  ctx.fillRect(px + 12, py + 10, 26, 28);
-  ctx.fillStyle = '#ffd169';
-  ctx.fillRect(px + 16, py + 4, 16, 10);
-  ctx.fillStyle = '#252525';
-  ctx.fillRect(px + 37, py + 20, 10, 4);
+  // Improved retro miner sprite with helmet, face, torso and spade.
+  ctx.fillStyle = '#ffca3a';
+  ctx.fillRect(px + 5, py + 1, 15, 5);
+  ctx.fillStyle = '#ffd8a8';
+  ctx.fillRect(px + 7, py + 6, 10, 6);
+  ctx.fillStyle = '#2a5daa';
+  ctx.fillRect(px + 6, py + 12, 12, 9);
+  ctx.fillStyle = '#3b2a1b';
+  ctx.fillRect(px + 8, py + 21, 3, 4);
+  ctx.fillRect(px + 13, py + 21, 3, 4);
+  ctx.fillStyle = '#9aa7bf';
+  ctx.fillRect(px + 18, py + 13, 6, 2);
+  ctx.fillRect(px + 23, py + 11, 2, 7);
 }
 
 function setMessage(msg) {
