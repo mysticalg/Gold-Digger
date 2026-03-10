@@ -40,6 +40,7 @@ const state = {
   lastMoveAt: 0,
   selectedSiteId: SITE_DEFS[0].id,
   maxDepth: 0,
+  zoom20x20: false,
 };
 
 const upgrades = [
@@ -234,13 +235,24 @@ function draw() {
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const viewportCols = Math.ceil(canvas.width / TILE_SIZE) + 2;
-  const viewportRows = Math.ceil(canvas.height / TILE_SIZE) + 2;
+  // Zoom mode can lock the camera to a tactical 20x20 tile view.
+  const fixedTiles = state.zoom20x20 ? 20 : null;
+  const viewportCols = fixedTiles ?? (Math.ceil(canvas.width / TILE_SIZE) + 2);
+  const viewportRows = fixedTiles ?? (Math.ceil(canvas.height / TILE_SIZE) + 2);
+  const tileSize = fixedTiles ? Math.floor(Math.min(canvas.width, canvas.height) / fixedTiles) : TILE_SIZE;
+  const boardWidthPx = viewportCols * tileSize;
+  const boardHeightPx = viewportRows * tileSize;
+  const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
+  const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
   state.camera.x = Math.max(0, Math.min(WORLD_WIDTH - viewportCols, state.player.x - Math.floor(viewportCols / 2)));
   state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
 
   drawSurface();
+
+  // Backplate helps visualize the exact zoomed 20x20 region.
+  ctx.fillStyle = '#19111a';
+  ctx.fillRect(offsetX - 2, offsetY - 2, boardWidthPx + 4, boardHeightPx + 4);
 
   for (let vy = 0; vy < viewportRows; vy += 1) {
     for (let vx = 0; vx < viewportCols; vx += 1) {
@@ -249,38 +261,39 @@ function draw() {
       if (!inBounds(wx, wy)) continue;
 
       const material = getCell(wx, wy);
-      const px = vx * TILE_SIZE;
-      const py = vy * TILE_SIZE;
+      const px = offsetX + (vx * tileSize);
+      const py = offsetY + (vy * tileSize);
 
       ctx.fillStyle = getMaterialColor(material);
-      ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+      ctx.fillRect(px, py, tileSize, tileSize);
 
       if (material !== MATERIALS.EMPTY) {
         ctx.fillStyle = 'rgba(0,0,0,0.18)';
-        ctx.fillRect(px + 2, py + 2, TILE_SIZE - 4, 3);
+        ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, Math.floor(tileSize * 0.18)));
       }
 
       if (material === MATERIALS.TREASURE) {
+        const gemSize = Math.max(4, Math.floor(tileSize * 0.38));
         ctx.fillStyle = '#5d4300';
-        ctx.fillRect(px + 5, py + 5, 6, 6);
+        ctx.fillRect(px + Math.floor((tileSize - gemSize) / 2), py + Math.floor((tileSize - gemSize) / 2), gemSize, gemSize);
       }
 
       ctx.strokeStyle = '#131723';
-      ctx.strokeRect(px, py, TILE_SIZE, TILE_SIZE);
+      ctx.strokeRect(px, py, tileSize, tileSize);
     }
   }
 
-  // Player sprite in screen coordinates.
-  const playerScreenX = (state.player.x - state.camera.x) * TILE_SIZE;
-  const playerScreenY = (state.player.y - state.camera.y) * TILE_SIZE;
+  // Player sprite in screen coordinates (scaled to current zoom tile size).
+  const playerScreenX = offsetX + ((state.player.x - state.camera.x) * tileSize);
+  const playerScreenY = offsetY + ((state.player.y - state.camera.y) * tileSize);
   ctx.fillStyle = '#f9c232';
-  ctx.fillRect(playerScreenX + 3, playerScreenY + 1, 10, 4);
+  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.2), playerScreenY + 1, Math.max(6, Math.floor(tileSize * 0.62)), Math.max(3, Math.floor(tileSize * 0.25)));
   ctx.fillStyle = '#ffd8ab';
-  ctx.fillRect(playerScreenX + 5, playerScreenY + 5, 6, 4);
+  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.3), playerScreenY + Math.floor(tileSize * 0.3), Math.max(4, Math.floor(tileSize * 0.38)), Math.max(3, Math.floor(tileSize * 0.22)));
   ctx.fillStyle = '#2a5daa';
-  ctx.fillRect(playerScreenX + 4, playerScreenY + 9, 8, 5);
+  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.25), playerScreenY + Math.floor(tileSize * 0.54), Math.max(5, Math.floor(tileSize * 0.5)), Math.max(4, Math.floor(tileSize * 0.31)));
   ctx.fillStyle = '#9ea9c4';
-  ctx.fillRect(playerScreenX + 12, playerScreenY + 9, 3, 6);
+  ctx.fillRect(playerScreenX + Math.floor(tileSize * 0.74), playerScreenY + Math.floor(tileSize * 0.54), Math.max(2, Math.floor(tileSize * 0.16)), Math.max(4, Math.floor(tileSize * 0.38)));
 }
 
 function setMessage(msg) {
@@ -310,6 +323,8 @@ function updateHud() {
   $('speed').textContent = state.digSpeed.toFixed(2);
   $('bomb-count').textContent = state.bombs;
   $('bombs').textContent = state.bombs;
+  $('zoom-mode').textContent = state.zoom20x20 ? '20x20' : 'Auto';
+  $('zoom-btn').textContent = state.zoom20x20 ? '🔍 Zoom: 20x20' : '🔍 Zoom: Auto';
 }
 
 function canDig(material, direction) {
@@ -475,6 +490,11 @@ function bindUi() {
 
   $('start-btn').addEventListener('click', startSelectedSite);
   $('bomb-btn').addEventListener('click', useBomb);
+  $('zoom-btn').addEventListener('click', () => {
+    state.zoom20x20 = !state.zoom20x20;
+    updateHud();
+    draw();
+  });
 
   const helpDialog = $('help-dialog');
   $('help-btn').addEventListener('click', () => helpDialog.showModal());
@@ -489,6 +509,11 @@ function bindUi() {
     if (key === ' ') {
       event.preventDefault();
       useBomb();
+    }
+    if (key === 'z') {
+      state.zoom20x20 = !state.zoom20x20;
+      updateHud();
+      draw();
     }
   });
 
