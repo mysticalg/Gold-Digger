@@ -21,6 +21,7 @@
       <button id="start-btn" class="btn primary" title="Start or restart your selected dig site">Start Dig</button>
       <button id="bomb-btn" class="btn" title="Blast nearby blocks below you">💣 Bomb (<span id="bomb-count">0</span>)</button>
       <button id="zoom-btn" class="btn" title="Toggle zoomed 20x20 tactical view">🔍 Zoom: Auto</button>
+      <button id="sfx-btn" class="btn" title="Toggle retro sound effects">🔊 SFX: On</button>
       <button id="help-btn" class="btn" title="Show game tips and controls">❓ Help</button>
     </section>
 
@@ -32,6 +33,8 @@
       <div class="stat" title="Current dig speed multiplier">⚡ Speed x<span id="speed">1</span></div>
       <div class="stat" title="Remaining bombs">💣 <span id="bombs">0</span></div>
       <div class="stat" title="Current camera zoom mode">🔎 <span id="zoom-mode">Auto</span></div>
+      <div class="stat" title="Whether sound effects are enabled">🔊 <span id="sfx-mode">On</span></div>
+      <div class="stat" title="Game state status">🎮 <span id="status">Active</span></div>
     </section>
 
     <section class="play-area" aria-label="Game board and upgrade shop">
@@ -59,8 +62,10 @@
       <li><strong>Rock</strong> needs Rock Drill. <strong>Metal/Granite</strong> are best handled with bombs.</li>
       <li>Collect treasure for money + XP and buy upgrades.</li>
       <li>Press <kbd>Space</kbd> to use a bomb.</li>
+      <li>Press <kbd>M</kbd> to toggle sound effects.</li>
       <li>Fog-of-war reveals only a smooth <strong>5-block</strong> sight radius; distant/unexplored cells fade to black.</li>
       <li>Press <kbd>Z</kbd> to toggle a fixed <strong>20x20</strong> zoomed play-area view.</li>
+      <li>If you are fully trapped by unbreakable rock/metal/granite with no bombs left, it is <strong>game over</strong>.</li>
     </ul>
     <button id="close-help" class="btn primary">Got it</button>
   </dialog>
