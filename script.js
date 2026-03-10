@@ -119,7 +119,11 @@ function coordNoise(x, y, seed) {
 
 /**
  * Build a 1000x1000 world.
- * Top row is sky/entry, and deeper layers become progressively harder.
+ * Material profile by depth:
+ * - upper crust: mostly sand with rising rock
+ * - mid crust: transitions to almost all rock
+ * - deep crust: all rock baseline
+ * - deep core: introduces metal then granite pockets
  */
 function buildWorld(siteDef) {
   const seed = SITE_DEFS.findIndex((s) => s.id === siteDef.id) + 1;
@@ -136,16 +140,41 @@ function buildWorld(siteDef) {
       }
 
       const n = coordNoise(x, y, seed);
-      const treasureChance = siteDef.treasureBias + (depth * 0.004);
-      const graniteChance = siteDef.graniteBias + (depth * 0.035);
-      const metalChance = siteDef.metalBias + (depth * 0.03);
-      const rockChance = siteDef.rockBias + (depth * 0.05);
+      const deepNoise = coordNoise(x + 99991, y + 31337, seed + 17);
 
-      if (n < treasureChance) world[idx] = MATERIALS.TREASURE;
-      else if (n < treasureChance + graniteChance) world[idx] = MATERIALS.GRANITE;
-      else if (n < treasureChance + graniteChance + metalChance) world[idx] = MATERIALS.METAL;
-      else if (n < treasureChance + graniteChance + metalChance + rockChance) world[idx] = MATERIALS.ROCK;
-      else world[idx] = MATERIALS.SAND;
+      // Treasure becomes slightly rarer at extreme depth where hard materials dominate.
+      const treasureChance = Math.max(0.004, siteDef.treasureBias - (depth * 0.006));
+      if (n < treasureChance) {
+        world[idx] = MATERIALS.TREASURE;
+        continue;
+      }
+
+      // 0.00 -> 0.35: sand to rock ramp.
+      if (depth < 0.35) {
+        const rockRatio = Math.min(1, siteDef.rockBias + (depth / 0.35) * 0.9);
+        world[idx] = deepNoise < rockRatio ? MATERIALS.ROCK : MATERIALS.SAND;
+        continue;
+      }
+
+      // 0.35 -> 0.65: all rock band.
+      if (depth < 0.65) {
+        world[idx] = MATERIALS.ROCK;
+        continue;
+      }
+
+      // 0.65 -> 0.85: rock + metal pockets.
+      if (depth < 0.85) {
+        const metalChance = siteDef.metalBias + ((depth - 0.65) / 0.2) * 0.24;
+        world[idx] = deepNoise < metalChance ? MATERIALS.METAL : MATERIALS.ROCK;
+        continue;
+      }
+
+      // 0.85 -> 1.00: core with granite and heavy metal mixed into rock.
+      const graniteChance = siteDef.graniteBias + ((depth - 0.85) / 0.15) * 0.35;
+      const metalChance = siteDef.metalBias + 0.18;
+      if (deepNoise < graniteChance) world[idx] = MATERIALS.GRANITE;
+      else if (deepNoise < graniteChance + metalChance) world[idx] = MATERIALS.METAL;
+      else world[idx] = MATERIALS.ROCK;
     }
   }
 
