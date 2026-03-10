@@ -19,11 +19,11 @@ body {
 }
 
 .game-shell {
-  width: min(1400px, 100%);
+  width: min(1240px, 100%);
   margin: 0 auto;
-  padding: clamp(0.45rem, 1.3vw, 1rem);
+  padding: clamp(0.35rem, 1vw, 0.8rem);
   display: grid;
-  gap: clamp(0.6rem, 1.4vw, 1rem);
+  gap: clamp(0.45rem, 1.1vw, 0.8rem);
 }
 
 .top-bar h1 {
@@ -80,7 +80,7 @@ select { min-height: 40px; }
   border-radius: 999px;
   padding: 0.35rem 0.75rem;
   border: 1px solid #3d466f;
-  font-size: 0.92rem;
+  font-size: 0.86rem;
 }
 
 .play-area {
@@ -94,7 +94,7 @@ select { min-height: 40px; }
 
 #game-canvas {
   width: 100%;
-  height: clamp(320px, 64vh, 760px);
+  height: clamp(280px, 56vh, 620px);
   image-rendering: pixelated;
   border: 3px solid #000;
   border-radius: 10px;

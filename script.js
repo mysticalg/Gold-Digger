@@ -43,11 +43,14 @@ const state = {
   lastMoveAt: 0,
   selectedSiteId: SITE_DEFS[0].id,
   maxDepth: 0,
-  zoom20x20: false,
+  // Start zoomed-in by default so the play area is easier to read on high-DPI displays.
+  zoom20x20: true,
   gameOver: false,
   sfxEnabled: true,
   particles: [],
   playerAnim: { bobPhase: 0, facing: 1 },
+  // Active timed dig action (3 seconds) with a 5-frame animation.
+  digAction: null,
 };
 
 const upgrades = [
@@ -143,6 +146,10 @@ function playTone(type = 'triangle', freq = 440, duration = 0.08, volume = 0.03,
 
 function playSfx(name) {
   if (name === 'dig') playTone('square', 180, 0.05, 0.025, 130);
+  if (name === 'dig-loop') {
+    playTone('square', 200, 0.05, 0.025, 155);
+    setTimeout(() => playTone('triangle', 140, 0.04, 0.02, 120), 45);
+  }
   if (name === 'treasure') {
     playTone('triangle', 520, 0.08, 0.04, 780);
     setTimeout(() => playTone('triangle', 780, 0.07, 0.035, 1040), 70);
@@ -405,6 +412,12 @@ function draw() {
   const px = playerScreenX;
   const py = playerScreenY + bob;
 
+  // 5-frame digging animation: arm/pick position changes while the timed dig action runs.
+  const digFrameOffsets = [0.05, 0.15, 0.29, 0.15, 0.05];
+  const isDigging = state.digAction?.active;
+  const digFrame = isDigging ? state.digAction.frame : 0;
+  const pickSwing = digFrameOffsets[digFrame] ?? 0.05;
+
   ctx.fillStyle = '#f9c232';
   ctx.fillRect(px + Math.floor(tileSize * 0.2), py + 1, Math.max(6, Math.floor(tileSize * 0.62)), Math.max(3, Math.floor(tileSize * 0.25)));
   ctx.fillStyle = '#ffd8ab';
@@ -412,8 +425,28 @@ function draw() {
   ctx.fillStyle = '#2a5daa';
   ctx.fillRect(px + Math.floor(tileSize * 0.25), py + Math.floor(tileSize * 0.54), Math.max(5, Math.floor(tileSize * 0.5)), Math.max(4, Math.floor(tileSize * 0.31)));
   ctx.fillStyle = '#9ea9c4';
-  const pickOffset = state.playerAnim.facing > 0 ? 0.74 : 0.08;
-  ctx.fillRect(px + Math.floor(tileSize * pickOffset), py + Math.floor(tileSize * 0.54), Math.max(2, Math.floor(tileSize * 0.16)), Math.max(4, Math.floor(tileSize * 0.38)));
+  const basePickOffset = state.playerAnim.facing > 0 ? 0.74 : 0.08;
+  const directionalSwing = state.playerAnim.facing > 0 ? pickSwing : -pickSwing;
+  const pickOffset = Math.max(0.02, Math.min(0.84, basePickOffset + directionalSwing));
+  const pickHeight = isDigging ? 0.46 + (digFrame * 0.03) : 0.54;
+  ctx.fillRect(px + Math.floor(tileSize * pickOffset), py + Math.floor(tileSize * pickHeight), Math.max(2, Math.floor(tileSize * 0.16)), Math.max(4, Math.floor(tileSize * 0.38)));
+
+  // Progress ring around player while a 3-second dig is in progress.
+  if (isDigging) {
+    const elapsed = performance.now() - state.digAction.startedAt;
+    const progress = Math.min(1, elapsed / state.digAction.durationMs);
+    ctx.strokeStyle = 'rgba(255, 222, 125, 0.95)';
+    ctx.lineWidth = Math.max(2, Math.floor(tileSize * 0.08));
+    ctx.beginPath();
+    ctx.arc(
+      px + Math.floor(tileSize * 0.5),
+      py + Math.floor(tileSize * 0.5),
+      Math.max(6, Math.floor(tileSize * 0.52)),
+      -Math.PI / 2,
+      -Math.PI / 2 + (Math.PI * 2 * progress),
+    );
+    ctx.stroke();
+  }
 
   if (state.gameOver) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -510,6 +543,86 @@ function digCell(x, y, direction, siteDef) {
 }
 
 /**
+ * Runs a delayed dig action so each block takes ~3 seconds to mine.
+ * Keeps the loop responsive by storing state and finishing via setTimeout.
+ */
+function beginTimedDig(nx, ny, direction, siteDef) {
+  if (state.digAction?.active || state.gameOver) return;
+
+  const material = getCell(nx, ny);
+  if (material === MATERIALS.EMPTY) {
+    completeMove(nx, ny, dyFromDirection(direction), siteDef);
+    return;
+  }
+
+  const durationMs = 3000;
+  const startedAt = performance.now();
+
+  state.digAction = {
+    active: true,
+    startedAt,
+    durationMs,
+    targetX: nx,
+    targetY: ny,
+    direction,
+    siteDef,
+    frame: 0,
+    sfxTimer: null,
+    doneTimer: null,
+  };
+
+  // Keep a steady 5-frame loop over 3 seconds for visible digging feedback.
+  const frameIntervalMs = Math.floor(durationMs / 5);
+  state.digAction.sfxTimer = setInterval(() => {
+    if (!state.digAction?.active) return;
+    const elapsed = performance.now() - startedAt;
+    const frame = Math.min(4, Math.floor((elapsed / durationMs) * 5));
+    state.digAction.frame = frame;
+    playSfx('dig-loop');
+  }, frameIntervalMs);
+
+  setMessage('Digging block... (3s)');
+
+  state.digAction.doneTimer = setTimeout(() => {
+    const activeDig = state.digAction;
+    if (!activeDig?.active) return;
+    if (activeDig.sfxTimer) clearInterval(activeDig.sfxTimer);
+
+    const didDig = digCell(nx, ny, direction, siteDef);
+    state.digAction = null;
+    if (!didDig) return;
+
+    completeMove(nx, ny, dyFromDirection(direction), siteDef);
+  }, durationMs);
+}
+
+function dyFromDirection(direction) {
+  if (direction === 'down') return 1;
+  if (direction === 'up') return -1;
+  return 0;
+}
+
+function completeMove(nx, ny, dy, siteDef) {
+  state.playerAnim.bobPhase += 0.85;
+  state.playerAnim.facing = nx < state.player.x ? -1 : nx > state.player.x ? 1 : state.playerAnim.facing;
+  state.player.x = nx;
+  state.player.y = ny;
+  state.maxDepth = Math.max(state.maxDepth, ny);
+  markVisibleArea(state.player.x, state.player.y);
+
+  if (dy === 0 && state.digRadius > 1) {
+    digCell(nx, Math.min(WORLD_HEIGHT - 1, ny + 1), 'down', siteDef);
+  }
+
+  settleColumn(nx);
+  settleColumn(state.player.x);
+  updateHud();
+  draw();
+
+  if (isTrapped()) endGameFromTrap();
+}
+
+/**
  * Detect a trap state: no legal movement in 4-neighborhood and no bombs.
  * This makes being fully boxed by hard blocks a lose condition.
  */
@@ -540,7 +653,7 @@ function endGameFromTrap() {
 }
 
 function movePlayer(dx, dy) {
-  if (state.gameOver) return;
+  if (state.gameOver || state.digAction?.active) return;
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
   state.lastMoveAt = now;
@@ -551,29 +664,17 @@ function movePlayer(dx, dy) {
 
   const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
   const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
-  if (!digCell(nx, ny, direction, siteDef)) return;
-
-  state.playerAnim.bobPhase += 0.85;
-  state.playerAnim.facing = dx < 0 ? -1 : dx > 0 ? 1 : state.playerAnim.facing;
-  state.player.x = nx;
-  state.player.y = ny;
-  state.maxDepth = Math.max(state.maxDepth, ny);
-  markVisibleArea(state.player.x, state.player.y);
-
-  if (dy === 0 && state.digRadius > 1) {
-    digCell(nx, Math.min(WORLD_HEIGHT - 1, ny + 1), 'down', siteDef);
+  if (!canDig(getCell(nx, ny), direction) && getCell(nx, ny) !== MATERIALS.EMPTY) {
+    // Reuse existing error messages and blocked SFX for undiggable materials.
+    digCell(nx, ny, direction, siteDef);
+    return;
   }
 
-  settleColumn(nx);
-  settleColumn(state.player.x);
-  updateHud();
-  draw();
-
-  if (isTrapped()) endGameFromTrap();
+  beginTimedDig(nx, ny, direction, siteDef);
 }
 
 function useBomb() {
-  if (state.gameOver) return;
+  if (state.gameOver || state.digAction?.active) return;
   if (state.bombs <= 0) {
     setMessage('Out of bombs. Buy Bomb Pack in the shop.', 'danger');
     playSfx('blocked');
@@ -647,6 +748,9 @@ function startSelectedSite() {
     state.camera = { x: 0, y: 0 };
     state.maxDepth = 0;
     state.gameOver = false;
+    if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
+    if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
+    state.digAction = null;
     state.particles = [];
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
