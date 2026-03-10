@@ -37,7 +37,7 @@
     <section class="play-area" aria-label="Game board and upgrade shop">
       <div class="board-wrap">
         <canvas id="game-canvas" width="1200" height="700" aria-label="Gold Digger grid board"></canvas>
-        <p class="legend">Use <kbd>← ↑ → ↓</kbd> or <kbd>WASD</kbd>. Press <kbd>Z</kbd> for a fixed <strong>20x20</strong> tactical zoom view.</p>
+        <p class="legend">Use <kbd>← ↑ → ↓</kbd> or <kbd>WASD</kbd>. Fog-of-war uses a smooth <strong>5-block</strong> vision radius. Press <kbd>Z</kbd> for 20x20 zoom.</p>
       </div>
 
       <aside class="shop" aria-label="Upgrade shop">
@@ -59,6 +59,7 @@
       <li><strong>Rock</strong> needs Rock Drill. <strong>Metal/Granite</strong> are best handled with bombs.</li>
       <li>Collect treasure for money + XP and buy upgrades.</li>
       <li>Press <kbd>Space</kbd> to use a bomb.</li>
+      <li>Fog-of-war reveals only a smooth <strong>5-block</strong> sight radius; distant/unexplored cells fade to black.</li>
       <li>Press <kbd>Z</kbd> to toggle a fixed <strong>20x20</strong> zoomed play-area view.</li>
     </ul>
     <button id="close-help" class="btn primary">Got it</button>

@@ -7,6 +7,7 @@
 const WORLD_WIDTH = 1000;
 const WORLD_HEIGHT = 1000;
 const TILE_SIZE = 16;
+const FOW_SIGHT_RADIUS = 5;
 
 const MATERIALS = {
   EMPTY: 0,
@@ -26,6 +27,7 @@ const SITE_DEFS = [
 
 const state = {
   world: new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT),
+  explored: new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT),
   player: { x: Math.floor(WORLD_WIDTH / 2), y: 0 },
   camera: { x: 0, y: 0 },
   money: 0,
@@ -105,6 +107,35 @@ function getCell(x, y) {
 
 function setCell(x, y, value) {
   if (inBounds(x, y)) state.world[indexOf(x, y)] = value;
+}
+
+/** Mark cells around the player as explored for fog-of-war tracking. */
+function markVisibleArea(cx, cy, radius = FOW_SIGHT_RADIUS) {
+  for (let y = cy - radius; y <= cy + radius; y += 1) {
+    for (let x = cx - radius; x <= cx + radius; x += 1) {
+      if (!inBounds(x, y)) continue;
+      const dist = Math.hypot(x - cx, y - cy);
+      if (dist <= radius) state.explored[indexOf(x, y)] = 1;
+    }
+  }
+}
+
+/**
+ * Returns fog alpha for a world cell based on distance from player and explored state.
+ *  - near the player: fully visible
+ *  - smoothly fades over distance
+ *  - radius edge and beyond: black (not visible)
+ */
+function getFogAlpha(wx, wy) {
+  const dist = Math.hypot(wx - state.player.x, wy - state.player.y);
+  const explored = state.explored[indexOf(wx, wy)] === 1;
+
+  if (!explored && dist > FOW_SIGHT_RADIUS) return 1;
+  if (dist <= 1) return 0;
+  if (dist >= FOW_SIGHT_RADIUS) return 1;
+
+  const t = (dist - 1) / (FOW_SIGHT_RADIUS - 1);
+  return Math.min(1, Math.max(0, t ** 1.35));
 }
 
 /**
@@ -278,6 +309,13 @@ function draw() {
         ctx.fillRect(px + Math.floor((tileSize - gemSize) / 2), py + Math.floor((tileSize - gemSize) / 2), gemSize, gemSize);
       }
 
+      // Fog of war: smooth falloff over a 5-tile sight radius.
+      const fogAlpha = getFogAlpha(wx, wy);
+      if (fogAlpha > 0) {
+        ctx.fillStyle = `rgba(0, 0, 0, ${fogAlpha.toFixed(3)})`;
+        ctx.fillRect(px, py, tileSize, tileSize);
+      }
+
       ctx.strokeStyle = '#131723';
       ctx.strokeRect(px, py, tileSize, tileSize);
     }
@@ -387,6 +425,7 @@ function movePlayer(dx, dy) {
   state.player.x = nx;
   state.player.y = ny;
   state.maxDepth = Math.max(state.maxDepth, ny);
+  markVisibleArea(state.player.x, state.player.y);
 
   if (dy === 0 && state.digRadius > 1) {
     digCell(nx, Math.min(WORLD_HEIGHT - 1, ny + 1), 'down', siteDef);
@@ -465,9 +504,11 @@ function startSelectedSite() {
   // Small timeout gives browser a frame to paint message before generation loop starts.
   setTimeout(() => {
     state.world = buildWorld(siteDef);
+    state.explored = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
     state.player = { x: Math.floor(WORLD_WIDTH / 2), y: 0 };
     state.camera = { x: 0, y: 0 };
     state.maxDepth = 0;
+    markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
     updateHud();
     renderShop();
