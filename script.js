@@ -437,30 +437,7 @@ function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, bo
   ctx.fillStyle = '#2f8d40';
   ctx.fillRect(offsetX, Math.max(boardTop, horizon - bandHeight), boardWidthPx, bandHeight);
 
-  // Draw cottage and shop at y=0 so navigation targets are visible.
-  const surfaceY = 0;
-  const cottageScreenX = offsetX + ((wrapX(SURFACE_SPOTS.cottageX - state.camera.x)) * tileSize);
-  const shopScreenX = offsetX + ((wrapX(SURFACE_SPOTS.shopX - state.camera.x)) * tileSize);
-  const buildingY = offsetY + ((surfaceY - state.camera.y) * tileSize);
-  if (buildingY + tileSize > 0 && buildingY < canvas.height) {
-    drawSurfaceBuilding(cottageScreenX, buildingY, tileSize, '#7a4f2b', '🛖');
-    drawSurfaceBuilding(shopScreenX, buildingY, tileSize, '#2f5f96', '🛒');
-  }
-}
-
-function drawSurfaceBuilding(screenX, screenY, tileSize, color, emoji) {
-  const w = Math.max(18, Math.floor(tileSize * 1.8));
-  const h = Math.max(14, Math.floor(tileSize * 1.2));
-  const x = Math.floor(screenX - ((w - tileSize) / 2));
-  const y = Math.floor(screenY - h - 2);
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = 'rgba(0,0,0,0.28)';
-  ctx.fillRect(x, y, w, Math.max(3, Math.floor(h * 0.25)));
-  ctx.font = `${Math.max(11, Math.floor(tileSize * 0.85))}px Trebuchet MS`;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#fff4d0';
-  ctx.fillText(emoji, x + (w / 2), y + h - Math.max(2, Math.floor(h * 0.2)));
+  // Surface landmarks are rendered as in-grid icon tiles so only one cottage/shop is shown.
 }
 
 /** Draw an always-visible icon tile for surface landmarks on the board itself. */
@@ -604,18 +581,25 @@ function draw() {
       const material = getCell(wx, wy);
       const px = offsetX + (vx * tileSize);
       const py = offsetY + (vy * tileSize);
-      ctx.fillStyle = getMaterialColor(material);
-      ctx.fillRect(px, py, tileSize, tileSize);
+      const isCottageTile = wy === 0 && wx === wrapX(SURFACE_SPOTS.cottageX);
+      const isShopTile = wy === 0 && wx === wrapX(SURFACE_SPOTS.shopX);
+      const transparentSurfaceLane = wy === 0 && material === MATERIALS.EMPTY && !isCottageTile && !isShopTile;
 
-      if (material !== MATERIALS.EMPTY) {
+      // Keep the y=0 lane transparent so the sky touches the grass with no black separator row.
+      if (!transparentSurfaceLane) {
+        ctx.fillStyle = getMaterialColor(material);
+        ctx.fillRect(px, py, tileSize, tileSize);
+      }
+
+      if (material !== MATERIALS.EMPTY && !transparentSurfaceLane) {
         ctx.fillStyle = 'rgba(0,0,0,0.18)';
         ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, Math.floor(tileSize * 0.18)));
       }
 
       // Overlay landmark icons so cottage/shop remain visible while on the surface lane.
-      if (wy === 0 && wx === wrapX(SURFACE_SPOTS.cottageX)) {
+      if (isCottageTile) {
         drawSurfaceIconTile(px, py, tileSize, '#8e5a31', '🛖');
-      } else if (wy === 0 && wx === wrapX(SURFACE_SPOTS.shopX)) {
+      } else if (isShopTile) {
         drawSurfaceIconTile(px, py, tileSize, '#366fb0', '🛒');
       }
 
@@ -626,14 +610,17 @@ function draw() {
         ctx.fillRect(px + Math.floor((tileSize - gemSize) / 2), py + Math.floor((tileSize - gemSize) / 2), gemSize, gemSize);
       }
 
-      const fogAlpha = getFogAlpha(wx, wy);
-      if (fogAlpha > 0) {
-        ctx.fillStyle = `rgba(0, 0, 0, ${fogAlpha.toFixed(3)})`;
-        ctx.fillRect(px, py, tileSize, tileSize);
-      }
+      // Keep the transparent surface lane unobstructed by fog/grid so sky remains continuous.
+      if (!transparentSurfaceLane) {
+        const fogAlpha = getFogAlpha(wx, wy);
+        if (fogAlpha > 0) {
+          ctx.fillStyle = `rgba(0, 0, 0, ${fogAlpha.toFixed(3)})`;
+          ctx.fillRect(px, py, tileSize, tileSize);
+        }
 
-      ctx.strokeStyle = '#131723';
-      ctx.strokeRect(px, py, tileSize, tileSize);
+        ctx.strokeStyle = '#131723';
+        ctx.strokeRect(px, py, tileSize, tileSize);
+      }
     }
   }
 
