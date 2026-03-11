@@ -44,6 +44,8 @@ const MATERIALS = {
   EMERALD: 13,
   SAPPHIRE: 14,
   GEMSTONE: 15,
+  STRUT: 16,
+  TORCH: 17,
 };
 
 const SITE_DEFS = [
@@ -63,6 +65,28 @@ const MINERAL_DEFS = {
 };
 
 const ANIMATED_MINERALS = new Set(Object.keys(MINERAL_DEFS).map((k) => Number(k)));
+
+const INVENTORY_DEFS = {
+  [MATERIALS.SAND]: { name: 'Sand', icon: '🟨', sell: 2, placeable: true },
+  [MATERIALS.ROCK]: { name: 'Rock', icon: '🪨', sell: 4, placeable: true },
+  [MATERIALS.METAL]: { name: 'Metal', icon: '⛓️', sell: 9, placeable: true },
+  [MATERIALS.GRANITE]: { name: 'Granite', icon: '⬛', sell: 8, placeable: true },
+  [MATERIALS.TREASURE]: { name: 'Treasure', icon: '💎', sell: 65, placeable: false },
+  [MATERIALS.GRASS]: { name: 'Grass', icon: '🌱', sell: 1, placeable: true },
+  [MATERIALS.RELIC]: { name: 'Relic', icon: '🏺', sell: 120, placeable: false },
+  [MATERIALS.CRYSTAL]: { name: 'Crystal', icon: '🔷', sell: 90, placeable: true },
+  [MATERIALS.GOLD]: { name: 'Gold', icon: '🥇', sell: 155, placeable: true },
+  [MATERIALS.DIAMOND]: { name: 'Diamond', icon: '💠', sell: 220, placeable: true },
+  [MATERIALS.RUBY]: { name: 'Ruby', icon: '♦️', sell: 185, placeable: true },
+  [MATERIALS.EMERALD]: { name: 'Emerald', icon: '🟩', sell: 180, placeable: true },
+  [MATERIALS.SAPPHIRE]: { name: 'Sapphire', icon: '🔹', sell: 188, placeable: true },
+  [MATERIALS.GEMSTONE]: { name: 'Gemstone', icon: '🔮', sell: 170, placeable: true },
+  [MATERIALS.STRUT]: { name: 'Strut', icon: '🪵', sell: 15, placeable: true },
+  [MATERIALS.TORCH]: { name: 'Torch', icon: '🕯️', sell: 20, placeable: true },
+};
+
+function tileKey(x, y) { return `${wrapX(x)},${y}`; }
+
 
 const state = {
   world: new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT),
@@ -114,6 +138,12 @@ const state = {
   // Short-lived in-board warning cue shown when the player tries to dig with zero stamina.
   staminaWarningUntil: 0,
   lastLowStaminaWarnAt: 0,
+  inventory: {},
+  selectedInventoryMaterial: null,
+  buildMode: false,
+  cheatMode: false,
+  lastMoveDir: { dx: 0, dy: 1 },
+  placedTorches: new Set(),
 };
 
 const upgrades = [
@@ -191,6 +221,22 @@ const upgrades = [
       state.waterUnlocked = true;
       state.water += 2;
     },
+  },
+  {
+    id: 'strut-pack',
+    name: 'Strut Bundle',
+    baseCost: 90,
+    requiredLevel: 2,
+    desc: 'Adds 10 support struts for base building and caverns.',
+    apply: () => { addInventory(MATERIALS.STRUT, 10); },
+  },
+  {
+    id: 'torch-pack',
+    name: 'Torch Crate',
+    baseCost: 85,
+    requiredLevel: 2,
+    desc: 'Adds 8 torches to light dark deep tunnels.',
+    apply: () => { addInventory(MATERIALS.TORCH, 8); },
   },
   {
     id: 'npc-digger',
@@ -355,15 +401,26 @@ function getFogAlpha(wx, wy) {
   const dist = Math.hypot(dx, wy - state.player.y);
   const explored = state.explored[indexOf(wx, wy)] === 1;
 
-  if (dist <= 1) return 0;
+  let torchBoost = 0;
+  for (const key of state.placedTorches) {
+    const [tx, ty] = key.split(',').map(Number);
+    const td = Math.hypot(wrappedDistanceX(wx, tx), wy - ty);
+    if (td <= 4) { torchBoost = Math.max(torchBoost, (4 - td) / 4); }
+  }
+
+  const deepDarkness = Math.max(0, (wy - 180) / 700) * 0.45;
+
+  if (dist <= 1) return Math.max(0, deepDarkness - (torchBoost * 0.5));
 
   if (dist >= FOW_SIGHT_RADIUS) {
-    return explored ? 0.42 : 1;
+    const base = explored ? 0.42 : 1;
+    return Math.max(0, Math.min(1, base + deepDarkness - (torchBoost * 0.55)));
   }
 
   const t = (dist - 1) / (FOW_SIGHT_RADIUS - 1);
   const activeFog = Math.min(1, Math.max(0, t ** 1.35));
-  return explored ? activeFog * 0.45 : activeFog;
+  const fog = explored ? activeFog * 0.45 : activeFog;
+  return Math.max(0, Math.min(1, fog + deepDarkness - (torchBoost * 0.55)));
 }
 
 function coordNoise(x, y, seed) {
@@ -431,13 +488,17 @@ function buildWorld(siteDef) {
       // Deep mineral veins/deposits: broad contiguous pockets formed from layered noise bands.
       const veinNoiseA = coordNoise(x * 2 + 71, y * 2 + 19, seed + 101);
       const veinNoiseB = coordNoise(x + 913, Math.floor(y * 0.7), seed + 203);
-      const deepBand = Math.max(0, (undergroundDepth - 0.74) / 0.26);
-      if (deepBand > 0.02 && veinNoiseA > 0.61 && veinNoiseA < (0.76 + deepBand * 0.12)) {
-        if (veinNoiseB > 0.86) { world[idx] = MATERIALS.DIAMOND; continue; }
-        if (veinNoiseB > 0.74) { world[idx] = MATERIALS.SAPPHIRE; continue; }
-        if (veinNoiseB > 0.63) { world[idx] = MATERIALS.EMERALD; continue; }
-        if (veinNoiseB > 0.54) { world[idx] = MATERIALS.RUBY; continue; }
-        if (veinNoiseB > 0.46) { world[idx] = MATERIALS.GEMSTONE; continue; }
+      const pocketNoise = coordNoise(x * 3 + 19, y * 3 + 29, seed + 307);
+      const deepBand = Math.max(0, (undergroundDepth - 0.68) / 0.32);
+      const veinThresholdMin = 0.56 - (deepBand * 0.06);
+      const veinThresholdMax = 0.77 + (deepBand * 0.18);
+      // Larger deep pockets become more common with depth to create rich excavation zones.
+      if (deepBand > 0.01 && veinNoiseA > veinThresholdMin && veinNoiseA < veinThresholdMax && pocketNoise > (0.34 - deepBand * 0.12)) {
+        if (veinNoiseB > 0.87) { world[idx] = MATERIALS.DIAMOND; continue; }
+        if (veinNoiseB > 0.75) { world[idx] = MATERIALS.SAPPHIRE; continue; }
+        if (veinNoiseB > 0.64) { world[idx] = MATERIALS.EMERALD; continue; }
+        if (veinNoiseB > 0.55) { world[idx] = MATERIALS.RUBY; continue; }
+        if (veinNoiseB > 0.47) { world[idx] = MATERIALS.GEMSTONE; continue; }
         world[idx] = MATERIALS.GOLD;
         continue;
       }
@@ -477,6 +538,8 @@ function getMaterialColor(type) {
     case MATERIALS.EMERALD: return MINERAL_DEFS[MATERIALS.EMERALD].baseColor;
     case MATERIALS.SAPPHIRE: return MINERAL_DEFS[MATERIALS.SAPPHIRE].baseColor;
     case MATERIALS.GEMSTONE: return MINERAL_DEFS[MATERIALS.GEMSTONE].baseColor;
+    case MATERIALS.STRUT: return '#8f6a41';
+    case MATERIALS.TORCH: return '#d79a3a';
     default: return '#0f1320';
   }
 }
@@ -1199,6 +1262,98 @@ function startRest(manual = false) {
   }, REST_DURATION_MS + 120);
 }
 
+
+function addInventory(material, amount = 1) {
+  if (!INVENTORY_DEFS[material] || amount <= 0) return;
+  state.inventory[material] = (state.inventory[material] || 0) + amount;
+  if (!state.selectedInventoryMaterial) state.selectedInventoryMaterial = Number(material);
+}
+
+function removeInventory(material, amount = 1) {
+  if (!state.inventory[material]) return false;
+  state.inventory[material] -= amount;
+  if (state.inventory[material] <= 0) delete state.inventory[material];
+  if (state.selectedInventoryMaterial === material && !state.inventory[material]) {
+    const next = Object.keys(state.inventory).map(Number).find((m) => INVENTORY_DEFS[m]?.placeable);
+    state.selectedInventoryMaterial = next || null;
+  }
+  return true;
+}
+
+function sellInventory() {
+  if (!isAtShop()) { setMessage('Go to shop tile to sell inventory.', 'danger'); return; }
+  let total = 0;
+  for (const [k, count] of Object.entries(state.inventory)) {
+    const def = INVENTORY_DEFS[k];
+    if (!def || count <= 0) continue;
+    total += def.sell * count;
+  }
+  state.inventory = {};
+  state.selectedInventoryMaterial = null;
+  state.money += total;
+  setMessage(total > 0 ? `Sold inventory for $${total}.` : 'Inventory is empty.');
+  updateHud();
+}
+
+function getPlacementTarget() {
+  const dir = state.lastMoveDir || { dx: 0, dy: 1 };
+  const tx = wrapX(state.player.x + dir.dx);
+  const ty = state.player.y + dir.dy;
+  if (!inBounds(tx, ty)) return null;
+  return { tx, ty };
+}
+
+function placeSelectedTile(dropOnly = false) {
+  const material = state.selectedInventoryMaterial;
+  if (!material) { setMessage('Select an inventory material first.', 'danger'); return; }
+  if (!state.inventory[material]) { setMessage('No units of that tile left.', 'danger'); return; }
+  const target = getPlacementTarget();
+  if (!target) return;
+  if (getCell(target.tx, target.ty) !== MATERIALS.EMPTY) {
+    setMessage('Placement target must be empty.', 'danger');
+    return;
+  }
+  if (!dropOnly && !state.buildMode) {
+    setMessage('Enable Build mode (B) before placing.', 'danger');
+    return;
+  }
+  if (!INVENTORY_DEFS[material]?.placeable) {
+    setMessage('That material cannot be placed.', 'danger');
+    return;
+  }
+  removeInventory(material, 1);
+  setCell(target.tx, target.ty, material);
+  if (material === MATERIALS.TORCH) state.placedTorches.add(tileKey(target.tx, target.ty));
+  setMessage(dropOnly ? 'Dropped 1 tile.' : 'Placed tile.');
+  updateHud();
+}
+
+function cycleBuildMaterial() {
+  const placeable = Object.keys(state.inventory).map(Number).filter((m) => INVENTORY_DEFS[m]?.placeable);
+  if (!placeable.length) { state.selectedInventoryMaterial = null; updateHud(); return; }
+  const idx = Math.max(0, placeable.indexOf(state.selectedInventoryMaterial));
+  state.selectedInventoryMaterial = placeable[(idx + 1) % placeable.length];
+  updateHud();
+}
+
+function toggleCheatMode() {
+  state.cheatMode = !state.cheatMode;
+  if (state.cheatMode) {
+    state.money = Math.max(state.money, 999999);
+    state.bombs = 999;
+    state.water = 999;
+    state.waterUnlocked = true;
+    state.canDigRock = true;
+    state.canDigPillars = true;
+    state.digSpeed = 4;
+    state.cooldownMs = 40;
+    addInventory(MATERIALS.STRUT, 60);
+    addInventory(MATERIALS.TORCH, 60);
+  }
+  setMessage(state.cheatMode ? 'Cheat mode ON for testing.' : 'Cheat mode OFF.');
+  updateHud();
+}
+
 function setMessage(msg, tone = 'good') {
   messageBox.textContent = msg;
   messageBox.classList.toggle('is-danger', tone === 'danger');
@@ -1266,9 +1421,24 @@ function updateHud() {
   $('auto-dig-btn').textContent = state.autoDigEnabled ? '🤖 Auto Dig: On' : '🤖 Auto Dig: Off';
   $('water-btn').disabled = state.gameOver || (!state.waterUnlocked && !isAtShop()) || state.restAction?.active;
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
+  $('build-mode').textContent = state.buildMode ? 'On' : 'Off';
+  $('cheat-mode').textContent = state.cheatMode ? 'On' : 'Off';
+  const selectedDef = INVENTORY_DEFS[state.selectedInventoryMaterial];
+  $('build-tile').textContent = selectedDef ? `${selectedDef.icon} ${selectedDef.name}` : 'None';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
+  $('build-btn').textContent = state.buildMode ? '🧱 Build: On' : '🧱 Build: Off';
+  $('cheat-btn').textContent = state.cheatMode ? '🧪 Cheat: On' : '🧪 Cheat: Off';
   $('status').textContent = state.gameOver ? 'Game Over' : state.restAction?.active ? 'Resting' : 'Active';
   $('rest-btn').disabled = state.gameOver || !isAtCottage() || state.stamina >= state.maxStamina || !!state.digAction?.active;
+  $('sell-btn').disabled = state.gameOver || !isAtShop();
+  $('drop-btn').disabled = state.gameOver || !state.selectedInventoryMaterial || !state.inventory[state.selectedInventoryMaterial];
+
+  if (state.cheatMode) {
+    state.money = Math.max(state.money, 999999);
+    state.stamina = state.maxStamina;
+    state.bombs = Math.max(state.bombs, 999);
+    state.water = Math.max(state.water, 999);
+  }
 
   const progressFill = $('rest-progress-fill');
   const progressText = $('rest-progress-text');
@@ -1282,11 +1452,32 @@ function updateHud() {
     progressText.textContent = state.stamina >= state.maxStamina ? 'Ready' : 'Needs Rest';
   }
 
+  const list = $('inventory-list');
+  list.innerHTML = "";
+  const mats = Object.keys(state.inventory).map(Number).sort((a, b) => (INVENTORY_DEFS[b]?.sell || 0) - (INVENTORY_DEFS[a]?.sell || 0));
+  if (!mats.length) {
+    const empty = document.createElement('p');
+    empty.className = 'shop-hint';
+    empty.textContent = 'Inventory empty. Dig to collect blocks and valuables.';
+    list.appendChild(empty);
+  }
+  for (const material of mats) {
+    const def = INVENTORY_DEFS[material];
+    if (!def) continue;
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `inventory-item ${state.selectedInventoryMaterial === material ? 'is-selected' : ''}`;
+    row.title = `${def.name}: sell $${def.sell} each${def.placeable ? ' (placeable)' : ''}`;
+    row.innerHTML = `<span class="label">${def.icon} ${def.name}</span><span class="count">x${state.inventory[material]}</span>`;
+    row.addEventListener('click', () => { state.selectedInventoryMaterial = material; updateHud(); });
+    list.appendChild(row);
+  }
+
   renderShop();
 }
 
 function canDig(material, direction) {
-  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE].includes(material)) return true;
+  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE, MATERIALS.STRUT, MATERIALS.TORCH].includes(material)) return true;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
   if (material === MATERIALS.GRANITE) return state.canDigRock;
@@ -1308,33 +1499,33 @@ function settleColumn(x) {
 
 function collectTreasure(siteDef, x, y) {
   const payout = Math.floor((45 + Math.random() * 50) * (state.lootMultiplier || 1));
-  state.money += payout;
+  addInventory(MATERIALS.TREASURE, 1);
   gainXp(26 * siteDef.xpBonus);
   spawnParticles(x, y, '#ffdf55', 14, 1.2);
   playSfx('treasure');
-  setMessage(`Treasure found! +$${payout}`);
+  setMessage(`Treasure found! Added to inventory ($${payout} value).`);
 }
 
 /** Additional collectible node: relic cache with larger money and XP burst. */
 function collectRelic(siteDef, x, y) {
   const payout = Math.floor((85 + Math.random() * 65) * (state.lootMultiplier || 1));
-  state.money += payout;
+  addInventory(MATERIALS.RELIC, 1);
   gainXp(34 * siteDef.xpBonus);
   spawnParticles(x, y, '#d39b69', 16, 1.3);
   playSfx('treasure');
-  setMessage(`Ancient relic sold! +$${payout}`);
+  setMessage(`Ancient relic recovered and stored ($${payout} value).`);
 }
 
 /** Additional collectible node: crystal seam that can also grant a bonus bomb. */
 function collectCrystal(siteDef, x, y) {
   const payout = Math.floor((62 + Math.random() * 42) * (state.lootMultiplier || 1));
-  state.money += payout;
+  addInventory(MATERIALS.CRYSTAL, 1);
   gainXp(30 * siteDef.xpBonus);
   const bonusBomb = Math.random() < 0.25;
   if (bonusBomb) state.bombs += 1;
   spawnParticles(x, y, '#7be8ff', 14, 1.1);
   playSfx('treasure');
-  setMessage(`Crystal cache recovered! +$${payout}${bonusBomb ? ' +1 bonus bomb!' : ''}`);
+  setMessage(`Crystal cache stored ($${payout} value).${bonusBomb ? " +1 bonus bomb!" : ""}`);
 }
 
 /** Collect from deep mineral veins/deposits with unique payouts and XP. */
@@ -1342,11 +1533,11 @@ function collectMineral(siteDef, x, y, material) {
   const def = MINERAL_DEFS[material];
   if (!def) return;
   const payout = Math.floor((def.payoutMin + (Math.random() * def.payoutVar)) * (state.lootMultiplier || 1));
-  state.money += payout;
+  addInventory(material, 1);
   gainXp(def.xp * siteDef.xpBonus);
   spawnParticles(x, y, def.frameA, 16, 1.25);
   playSfx('treasure');
-  setMessage(`${def.name} mined! +$${payout}`);
+  setMessage(`${def.name} mined and stashed ($${payout} value).`);
 }
 
 function digCell(x, y, direction, siteDef) {
@@ -1367,6 +1558,8 @@ function digCell(x, y, direction, siteDef) {
   if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
   if (ANIMATED_MINERALS.has(material)) collectMineral(siteDef, x, y, material);
   if (material !== MATERIALS.EMPTY) {
+    if (![MATERIALS.TREASURE, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material) && !ANIMATED_MINERALS.has(material)) addInventory(material, 1);
+    if (material === MATERIALS.TORCH) state.placedTorches.delete(tileKey(x, y));
     setCell(x, y, MATERIALS.EMPTY);
     // Reverse origin spray so chunks kick back opposite the current dig direction.
     spawnParticles(x, y, getMaterialColor(material), 8, 1.05, state.player.x, state.player.y, true);
@@ -1391,7 +1584,7 @@ function beginTimedDig(nx, ny, direction, siteDef) {
     return;
   }
 
-  const durationMs = 3000;
+  const durationMs = state.cheatMode ? 220 : 3000;
   const startedAt = performance.now();
 
   state.digAction = {
@@ -1513,6 +1706,7 @@ function movePlayer(dx, dy) {
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
 
+  state.lastMoveDir = { dx, dy };
   const nx = wrapX(state.player.x + dx);
   const ny = state.player.y + dy;
   if (!inBounds(0, ny)) return;
@@ -1578,6 +1772,7 @@ function autoHasEscapeAt(nx, ny) {
 }
 
 function tryAutoMove(dx, dy) {
+  state.lastMoveDir = { dx, dy };
   const nx = wrapX(state.player.x + dx);
   const ny = state.player.y + dy;
   if (!inBounds(0, ny)) return false;
@@ -1623,7 +1818,7 @@ function updateAutoDig(now = performance.now()) {
     const ny = state.player.y + d.dy;
     if (!inBounds(nx, ny)) continue;
     const material = getCell(nx, ny);
-    if (![MATERIALS.TREASURE, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) continue;
+    if (![MATERIALS.TREASURE, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE].includes(material)) continue;
     if (tryAutoMove(d.dx, d.dy)) return;
   }
 
@@ -1757,6 +1952,12 @@ function startSelectedSite() {
     state.lastLavaFlowAt = 0;
     state.npc = { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 };
     state.autoDigEnabled = false;
+    state.inventory = {};
+    state.selectedInventoryMaterial = null;
+    state.buildMode = false;
+    state.cheatMode = false;
+    state.lastMoveDir = { dx: 0, dy: 1 };
+    state.placedTorches = new Set();
     if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
     if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
@@ -1813,6 +2014,10 @@ function bindUi() {
     state.sfxEnabled = !state.sfxEnabled;
     updateHud();
   });
+  $('cheat-btn').addEventListener('click', toggleCheatMode);
+  $('sell-btn').addEventListener('click', sellInventory);
+  $('build-btn').addEventListener('click', () => { state.buildMode = !state.buildMode; updateHud(); });
+  $('drop-btn').addEventListener('click', () => placeSelectedTile(true));
 
   const helpDialog = $('help-dialog');
   $('help-btn').addEventListener('click', () => helpDialog.showModal());
@@ -1839,6 +2044,10 @@ function bindUi() {
       state.sfxEnabled = !state.sfxEnabled;
       updateHud();
     }
+    if (key === 'b') { state.buildMode = !state.buildMode; updateHud(); }
+    if (key === 'c') cycleBuildMaterial();
+    if (key === 'e') placeSelectedTile(false);
+    if (key === 'x') toggleCheatMode();
   });
 
   window.addEventListener('resize', draw);

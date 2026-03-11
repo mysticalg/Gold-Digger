@@ -209,3 +209,54 @@ kbd {
 
 
 .is-hidden { display: none !important; }
+
+
+.inventory {
+  padding: 0.9rem;
+}
+
+.inventory h2 { margin: 0 0 0.6rem; }
+
+.inventory-controls {
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin-bottom: 0.6rem;
+}
+
+.inventory-list {
+  display: grid;
+  gap: 0.4rem;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 0.2rem;
+}
+
+.inventory-item {
+  background: #121628;
+  border: 1px solid #37416b;
+  border-radius: 9px;
+  padding: 0.45rem 0.55rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.45rem;
+  cursor: pointer;
+}
+
+.inventory-item.is-selected {
+  border-color: #ffd15f;
+  box-shadow: 0 0 0 1px #ffd15f;
+}
+
+.inventory-item .label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text);
+}
+
+.inventory-item .count {
+  color: var(--muted);
+  font-weight: 700;
+}
