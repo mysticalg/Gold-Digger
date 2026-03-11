@@ -17,12 +17,15 @@ Gold Digger is a retro-style browser mining game with a looping world, upgrade p
 - **Rest at cottage:** `R` (when standing on 🛖)
 - **Toggle zoom:** `Z`
 - **Toggle sound:** `M`
+- **Use/collect water:** `Q` or Water button
 
 ## Core Gameplay Notes
 - The world loops horizontally, so moving past one side wraps to the other.
-- Surface landmarks (🛖 cottage and 🛒 shop) are world objects and can drop if their support is mined away.
+- Surface landmarks (🛖 cottage, 🛒 shop, and unlockable 🪣 well) are world objects and can drop if their support is mined away.
 - Grass spreads only into adjacent empty tiles (including diagonals) when that tile has sand directly underneath.
 - Return to the cottage to refill stamina.
+- Deep lava leaks can spread when opened; use water from the well to cool lava into granite.
+- You can hire an NPC digger in the shop to auto-mine and collect loot for you.
 - Buy upgrades while standing on the shop tile.
 
 ## Local Development

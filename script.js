@@ -12,6 +12,7 @@ const FOW_SIGHT_RADIUS = 5;
 const MAX_STAMINA = 12;
 const REST_DURATION_MS = 10000;
 const GRASS_SPREAD_INTERVAL_MS = 1000;
+const LAVA_FLOW_INTERVAL_MS = 900;
 const STAMINA_WARNING_MS = 1800;
 
 // Surface buildings placed next to each other at the top lane.
@@ -23,6 +24,7 @@ const SURFACE_SPOTS = {
 const LANDMARK_IDS = {
   COTTAGE: 'cottage',
   SHOP: 'shop',
+  WELL: 'well',
 };
 
 const MATERIALS = {
@@ -35,6 +37,7 @@ const MATERIALS = {
   GRASS: 6,
   RELIC: 7,
   CRYSTAL: 8,
+  LAVA: 9,
 };
 
 const SITE_DEFS = [
@@ -76,11 +79,17 @@ const state = {
   restAction: null,
   // Timestamp throttle for sand-supported grass spreading checks.
   lastGrassSpreadAt: 0,
-  // Cottage/shop are physical landmark tiles that can drop if the column under them is mined away.
+  // Cottage/shop/well are physical landmark tiles that can drop if the column under them is mined away.
   surfaceLandmarks: {
     [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
     [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
+    [LANDMARK_IDS.WELL]: { x: SURFACE_SPOTS.shopX + 1, y: 0 },
   },
+  lastLavaFlowAt: 0,
+  lavaSources: new Map(),
+  waterUnlocked: false,
+  water: 0,
+  npc: { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 },
   // Short-lived in-board warning cue shown when the player tries to dig with zero stamina.
   staminaWarningUntil: 0,
 };
@@ -110,7 +119,7 @@ const upgrades = [
     name: 'Rock Drill',
     baseCost: 220,
     requiredLevel: 3,
-    desc: 'Allows mining standard rock.',
+    desc: 'Allows mining standard rock and cooled granite.',
     apply: () => { state.canDigRock = true; },
   },
   {
@@ -147,6 +156,36 @@ const upgrades = [
     requiredLevel: 4,
     desc: 'Increases collectible payout by 20%.',
     apply: () => { state.lootMultiplier = (state.lootMultiplier || 1) + 0.2; },
+  },
+  {
+    id: 'well-unlock',
+    name: 'Well Unlock',
+    baseCost: 240,
+    requiredLevel: 3,
+    desc: 'Unlocks the well next to the shop so you can collect water.',
+    oneTime: true,
+    isOwned: () => state.waterUnlocked,
+    apply: () => {
+      state.waterUnlocked = true;
+      state.water += 2;
+    },
+  },
+  {
+    id: 'npc-digger',
+    name: 'NPC Digger',
+    baseCost: 360,
+    requiredLevel: 4,
+    desc: 'Hire (or replace) an auto-digger that mines and sells loot for you.',
+    canBuy: () => !state.npc.alive,
+    apply: () => {
+      state.npc.owned = true;
+      state.npc.alive = true;
+      state.npc.x = state.player.x;
+      state.npc.y = Math.max(0, state.player.y);
+      state.npc.stamina = state.npc.maxStamina;
+      state.npc.restUntil = 0;
+      state.npc.nextActionAt = performance.now() + 350;
+    },
   },
 ];
 
@@ -330,6 +369,13 @@ function buildWorld(siteDef) {
         continue;
       }
 
+      // Deep isolated lava pockets are initially contained by hard rock.
+      const lavaChance = Math.max(0, undergroundDepth - 0.82) * 0.04;
+      if (n > 0.62 && n < (0.62 + lavaChance) && deepNoise < 0.35) {
+        world[idx] = MATERIALS.LAVA;
+        continue;
+      }
+
       const graniteChance = siteDef.graniteBias + ((undergroundDepth - 0.85) / 0.15) * 0.35;
       const metalChance = siteDef.metalBias + 0.18;
       if (deepNoise < graniteChance) world[idx] = MATERIALS.GRANITE;
@@ -351,6 +397,7 @@ function getMaterialColor(type) {
     case MATERIALS.GRASS: return '#4aa34a';
     case MATERIALS.RELIC: return '#b57f5f';
     case MATERIALS.CRYSTAL: return '#68def2';
+    case MATERIALS.LAVA: return '#ff6a2a';
     default: return '#0f1320';
   }
 }
@@ -501,6 +548,162 @@ function updateGrassSpread(now = performance.now()) {
   for (const [x, y] of newGrass) setCell(x, y, MATERIALS.GRASS);
 }
 
+function lavaKey(x, y) {
+  return `${wrapX(x)},${y}`;
+}
+
+function initLavaSourcesFromWorld() {
+  state.lavaSources = new Map();
+  for (let y = 0; y < WORLD_HEIGHT; y += 1) {
+    for (let x = 0; x < WORLD_WIDTH; x += 1) {
+      if (getCell(x, y) !== MATERIALS.LAVA) continue;
+      // Each original lava tile may expand to ~10x its initial size.
+      state.lavaSources.set(lavaKey(x, y), { x: wrapX(x), y, spreadLeft: 9 });
+    }
+  }
+}
+
+function killNpc(reason) {
+  if (!state.npc.alive) return;
+  state.npc.alive = false;
+  setMessage(`NPC digger died: ${reason}. Buy another at the shop.`, 'danger');
+}
+
+function updateLavaFlow(now = performance.now()) {
+  if (now - state.lastLavaFlowAt < LAVA_FLOW_INTERVAL_MS) return;
+  state.lastLavaFlowAt = now;
+
+  const newLava = [];
+  for (const source of state.lavaSources.values()) {
+    if (source.spreadLeft <= 0) continue;
+    const candidates = [];
+    const dirs = [[0, 1], [1, 0], [-1, 0], [0, -1]];
+    for (const [dx, dy] of dirs) {
+      const nx = wrapX(source.x + dx);
+      const ny = source.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      if (getCell(nx, ny) === MATERIALS.EMPTY) candidates.push([nx, ny]);
+    }
+    if (!candidates.length) continue;
+    const [nx, ny] = candidates[Math.floor(Math.random() * candidates.length)];
+    newLava.push([nx, ny]);
+    source.spreadLeft -= 1;
+  }
+
+  for (const [nx, ny] of newLava) {
+    setCell(nx, ny, MATERIALS.LAVA);
+    state.lavaSources.set(lavaKey(nx, ny), { x: nx, y: ny, spreadLeft: 0 });
+    if (state.npc.alive && state.npc.x === nx && state.npc.y === ny) killNpc('walked into a lava leak');
+    if (state.player.x === nx && state.player.y === ny) {
+      state.gameOver = true;
+      setMessage('Lava engulfed your tile. Game over!', 'danger');
+    }
+  }
+}
+
+function isAtWell() {
+  const well = getLandmark(LANDMARK_IDS.WELL);
+  return state.waterUnlocked && state.player.y === well.y && wrapX(state.player.x) === wrapX(well.x);
+}
+
+function useWater() {
+  if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
+  if (!state.waterUnlocked) {
+    setMessage('Unlock the well in the shop before using water.', 'danger');
+    return;
+  }
+
+  if (isAtWell()) {
+    state.water = Math.min(12, state.water + 3);
+    setMessage('Collected water from the well (+3).');
+    updateHud();
+    return;
+  }
+
+  if (state.water <= 0) {
+    setMessage('No water left. Refill at the well (🪣).', 'danger');
+    return;
+  }
+
+  let cooled = 0;
+  for (let y = state.player.y - 1; y <= state.player.y + 1; y += 1) {
+    for (let x = state.player.x - 1; x <= state.player.x + 1; x += 1) {
+      if (!inBounds(x, y)) continue;
+      if (getCell(x, y) !== MATERIALS.LAVA) continue;
+      setCell(x, y, MATERIALS.GRANITE);
+      state.lavaSources.delete(lavaKey(x, y));
+      cooled += 1;
+    }
+  }
+
+  if (cooled <= 0) {
+    setMessage('Splash missed. Stand next to lava to cool it.', 'danger');
+    return;
+  }
+
+  state.water -= 1;
+  setMessage(`Water cooled ${cooled} lava tile${cooled === 1 ? '' : 's'} into granite.`);
+  updateHud();
+}
+
+function isNpcTrapped() {
+  const dirs = [[0,1],[1,0],[-1,0],[0,-1]];
+  return !dirs.some(([dx,dy]) => {
+    const nx = wrapX(state.npc.x + dx);
+    const ny = state.npc.y + dy;
+    if (!inBounds(nx, ny)) return false;
+    const m = getCell(nx, ny);
+    return m === MATERIALS.EMPTY || canDig(m, dy !== 0 ? (dy > 0 ? 'down':'up') : 'side');
+  });
+}
+
+function updateNpcDigger(now = performance.now()) {
+  if (!state.npc.alive) return;
+  if (state.npc.restUntil > now) return;
+  if (state.npc.restUntil && now >= state.npc.restUntil) {
+    state.npc.restUntil = 0;
+    state.npc.stamina = state.npc.maxStamina;
+  }
+  if (state.npc.stamina <= 0) {
+    state.npc.restUntil = now + REST_DURATION_MS;
+    return;
+  }
+  if (now < state.npc.nextActionAt) return;
+  state.npc.nextActionAt = now + 800;
+
+  if (isNpcTrapped()) {
+    killNpc('became trapped underground');
+    return;
+  }
+
+  const dirs = [[0,1],[1,0],[-1,0],[0,-1]];
+  const [dx, dy] = dirs[Math.floor(Math.random() * dirs.length)];
+  const nx = wrapX(state.npc.x + dx);
+  const ny = state.npc.y + dy;
+  if (!inBounds(nx, ny)) return;
+  const m = getCell(nx, ny);
+  const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
+  if (m === MATERIALS.LAVA) {
+    killNpc('entered lava');
+    return;
+  }
+  if (m !== MATERIALS.EMPTY && !canDig(m, direction)) return;
+
+  if (m === MATERIALS.TREASURE || m === MATERIALS.RELIC || m === MATERIALS.CRYSTAL) {
+    const reward = m === MATERIALS.TREASURE ? 55 : m === MATERIALS.RELIC ? 95 : 70;
+    state.money += Math.floor(reward * (state.lootMultiplier || 1));
+    gainXp(12);
+  }
+  if (m !== MATERIALS.EMPTY) {
+    setCell(nx, ny, MATERIALS.EMPTY);
+    state.npc.stamina = Math.max(0, state.npc.stamina - 1);
+  }
+  state.npc.x = nx;
+  state.npc.y = ny;
+  settleColumn(nx);
+  settleSurfaceLandmarks();
+}
+
 /**
  * Particle bursts make digs, treasure, and bombs feel responsive.
  * If an origin point is provided, particles can fly opposite the dig direction.
@@ -573,6 +776,8 @@ function updateParticles() {
 function draw() {
   const now = performance.now();
   updateGrassSpread(now);
+  updateLavaFlow(now);
+  updateNpcDigger(now);
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -618,7 +823,8 @@ function draw() {
       const py = offsetY + (vy * tileSize);
       const isCottageTile = isLandmarkAt(LANDMARK_IDS.COTTAGE, wx, wy);
       const isShopTile = isLandmarkAt(LANDMARK_IDS.SHOP, wx, wy);
-      const transparentSurfaceLane = wy === 0 && material === MATERIALS.EMPTY && !isCottageTile && !isShopTile;
+      const isWellTile = state.waterUnlocked && isLandmarkAt(LANDMARK_IDS.WELL, wx, wy);
+      const transparentSurfaceLane = wy === 0 && material === MATERIALS.EMPTY && !isCottageTile && !isShopTile && !isWellTile;
 
       // Keep the y=0 lane transparent so the sky touches the grass with no black separator row.
       if (!transparentSurfaceLane) {
@@ -636,6 +842,14 @@ function draw() {
         drawSurfaceIconTile(px, py, tileSize, '#8e5a31', '🛖');
       } else if (isShopTile) {
         drawSurfaceIconTile(px, py, tileSize, '#366fb0', '🛒');
+      } else if (isWellTile) {
+        drawSurfaceIconTile(px, py, tileSize, '#4d7bb5', '🪣');
+      }
+
+      if (material === MATERIALS.LAVA) {
+        const lavaPulse = (Math.sin((performance.now() / 140) + (wx * 0.4) + (wy * 0.2)) + 1) / 2;
+        ctx.fillStyle = `rgba(255, 208, 84, ${(0.22 + lavaPulse * 0.22).toFixed(3)})`;
+        ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, tileSize - 4));
       }
 
       if (material === MATERIALS.TREASURE) {
@@ -672,6 +886,18 @@ function draw() {
     ctx.globalAlpha = Math.max(0, p.life);
     ctx.fillRect(sx, sy, size, size);
     ctx.globalAlpha = 1;
+  }
+
+  if (state.npc.alive) {
+    const npcViewportX = wrapX(state.npc.x - state.camera.x);
+    const npcScreenX = offsetX + (npcViewportX * tileSize);
+    const npcScreenY = offsetY + ((state.npc.y - state.camera.y) * tileSize);
+    ctx.fillStyle = '#6ff0b5';
+    ctx.fillRect(npcScreenX + 2, npcScreenY + 2, Math.max(6, Math.floor(tileSize * 0.65)), Math.max(6, Math.floor(tileSize * 0.65)));
+    ctx.font = `${Math.max(10, Math.floor(tileSize * 0.7))}px Trebuchet MS`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#123221';
+    ctx.fillText('🤖', npcScreenX + Math.floor(tileSize * 0.5), npcScreenY + Math.floor(tileSize * 0.7));
   }
 
   // Convert world X -> viewport X with wrap awareness so edge-crossing never places
@@ -788,6 +1014,7 @@ function isLandmarkAt(id, x, y) {
  */
 function settleSurfaceLandmarks() {
   for (const id of Object.values(LANDMARK_IDS)) {
+    if (id === LANDMARK_IDS.WELL && !state.waterUnlocked) continue;
     const landmark = getLandmark(id);
     if (!landmark) continue;
     while (landmark.y < WORLD_HEIGHT - 1 && getCell(landmark.x, landmark.y + 1) === MATERIALS.EMPTY) {
@@ -893,11 +1120,22 @@ function updateHud() {
   $('speed').textContent = state.digSpeed.toFixed(2);
   $('bomb-count').textContent = state.bombs;
   $('bombs').textContent = state.bombs;
+  $('water').textContent = state.water;
+  $('water-count').textContent = state.water;
   $('zoom-mode').textContent = state.zoom20x20 ? '20x20' : 'Auto';
   $('stamina').textContent = state.stamina;
   $('stamina-max').textContent = state.maxStamina;
-  $('town-status').textContent = isAtCottage() ? 'At Cottage' : isAtShop() ? 'At Shop' : 'Away';
+  const townStatus = isAtCottage()
+    ? 'At Cottage'
+    : isAtShop()
+      ? 'At Shop'
+      : isAtWell()
+        ? 'At Well'
+        : 'Away';
+  $('town-status').textContent = townStatus;
+  $('npc-status').textContent = !state.npc.owned ? 'None' : state.npc.alive ? 'Digging' : 'Dead';
   $('zoom-btn').textContent = state.zoom20x20 ? '🔍 Zoom: 20x20' : '🔍 Zoom: Auto';
+  $('water-btn').disabled = state.gameOver || (!state.waterUnlocked && !isAtShop()) || state.restAction?.active;
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
   $('status').textContent = state.gameOver ? 'Game Over' : state.restAction?.active ? 'Resting' : 'Active';
@@ -909,6 +1147,8 @@ function canDig(material, direction) {
   if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) return true;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
+  if (material === MATERIALS.GRANITE) return state.canDigRock;
+  if (material === MATERIALS.LAVA) return false;
   return false;
 }
 
@@ -961,7 +1201,9 @@ function digCell(x, y, direction, siteDef) {
 
   if (!canDig(material, direction)) {
     if (material === MATERIALS.ROCK) setMessage('Rock Drill upgrade required for this block.', 'danger');
-    if (material === MATERIALS.METAL || material === MATERIALS.GRANITE) setMessage('Too hard to dig. Use a bomb!', 'danger');
+    if (material === MATERIALS.METAL) setMessage('Too hard to dig. Use a bomb!', 'danger');
+    if (material === MATERIALS.GRANITE) setMessage('Granite needs Rock Drill or bombs.', 'danger');
+    if (material === MATERIALS.LAVA) setMessage('Lava is unpassable. Cool it with water first.', 'danger');
     playSfx('blocked');
     return false;
   }
@@ -1156,6 +1398,7 @@ function useBomb() {
   for (let y = originY - 1; y <= originY + 1; y += 1) {
     for (let x = originX - 1; x <= originX + 1; x += 1) {
       if (!inBounds(x, y)) continue;
+      if (getCell(x, y) === MATERIALS.LAVA) state.lavaSources.delete(lavaKey(x, y));
       setCell(x, y, MATERIALS.EMPTY);
       spawnParticles(x, y, '#ff9466', 8, 1.6);
       settleColumn(x);
@@ -1192,15 +1435,21 @@ function renderShop() {
     const btn = document.createElement('button');
     btn.className = 'btn';
     const atShop = isAtShop();
+    const alreadyOwned = upgrade.oneTime && upgrade.isOwned?.();
+    const customBlocked = upgrade.canBuy && !upgrade.canBuy();
     btn.title = levelLocked
       ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
-      : !atShop
-        ? 'Stand on the surface shop tile (🛒) to buy upgrades'
-        : `Buy ${upgrade.name}`;
-    btn.textContent = 'Buy Upgrade';
-    btn.disabled = state.money < cost || levelLocked || state.gameOver || !atShop;
+      : alreadyOwned
+        ? `${upgrade.name} already unlocked`
+        : customBlocked
+          ? `Cannot buy ${upgrade.name} right now`
+          : !atShop
+            ? 'Stand on the surface shop tile (🛒) to buy upgrades'
+            : `Buy ${upgrade.name}`;
+    btn.textContent = alreadyOwned ? 'Owned' : 'Buy Upgrade';
+    btn.disabled = state.money < cost || levelLocked || state.gameOver || !atShop || alreadyOwned || customBlocked;
     btn.addEventListener('click', () => {
-      if (state.money < cost || levelLocked || state.gameOver) return;
+      if (state.money < cost || levelLocked || state.gameOver || alreadyOwned || customBlocked) return;
       if (!isAtShop()) {
         setMessage('Go to the surface shop tile (🛒) to buy upgrades.', 'danger');
         playSfx('blocked');
@@ -1231,11 +1480,16 @@ function startSelectedSite() {
     state.surfaceLandmarks = {
       [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
       [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
+      [LANDMARK_IDS.WELL]: { x: SURFACE_SPOTS.shopX + 1, y: 0 },
     };
     state.maxDepth = 0;
     state.gameOver = false;
     state.bombPackBonus = 0;
     state.lootMultiplier = 1;
+    state.waterUnlocked = false;
+    state.water = 0;
+    state.lastLavaFlowAt = 0;
+    state.npc = { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 };
     if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
     if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
@@ -1244,6 +1498,7 @@ function startSelectedSite() {
     state.stamina = state.maxStamina;
     state.staminaWarningUntil = 0;
     state.lastGrassSpreadAt = 0;
+    initLavaSourcesFromWorld();
     clearRestAction();
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
@@ -1273,6 +1528,7 @@ function bindUi() {
     draw();
   });
   $('rest-btn').addEventListener('click', startRest);
+  $('water-btn').addEventListener('click', useWater);
   $('sfx-btn').addEventListener('click', () => {
     state.sfxEnabled = !state.sfxEnabled;
     updateHud();
@@ -1298,6 +1554,7 @@ function bindUi() {
       draw();
     }
     if (key === 'r') startRest();
+    if (key === 'q') useWater();
     if (key === 'm') {
       state.sfxEnabled = !state.sfxEnabled;
       updateHud();
