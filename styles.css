@@ -180,3 +180,32 @@ kbd {
   .message { border-radius: 10px; }
   #game-canvas { height: min(52vh, 400px); }
 }
+
+
+.rest-progress-stat {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 220px;
+}
+
+.rest-progress {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #0a0f20;
+  border: 1px solid #39446f;
+  overflow: hidden;
+}
+
+.rest-progress-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #45d87d 0%, #9df5b7 100%);
+  transition: width 120ms linear;
+}
+
+
+.is-hidden { display: none !important; }
