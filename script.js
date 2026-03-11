@@ -38,6 +38,12 @@ const MATERIALS = {
   RELIC: 7,
   CRYSTAL: 8,
   LAVA: 9,
+  GOLD: 10,
+  DIAMOND: 11,
+  RUBY: 12,
+  EMERALD: 13,
+  SAPPHIRE: 14,
+  GEMSTONE: 15,
 };
 
 const SITE_DEFS = [
@@ -46,6 +52,17 @@ const SITE_DEFS = [
   { id: 'atlantis', name: 'Sunken Atlantis (Hard)', rockBias: 0.12, metalBias: 0.03, graniteBias: 0.018, treasureBias: 0.016, xpBonus: 1.5 },
   { id: 'himalaya', name: 'Himalayan Vault (Expert)', rockBias: 0.15, metalBias: 0.04, graniteBias: 0.024, treasureBias: 0.018, xpBonus: 1.8 },
 ];
+
+const MINERAL_DEFS = {
+  [MATERIALS.GOLD]: { name: 'Gold vein', baseColor: '#e2b93f', frameA: '#fff1a8', frameB: '#c18f1f', payoutMin: 95, payoutVar: 65, xp: 34 },
+  [MATERIALS.DIAMOND]: { name: 'Diamond cluster', baseColor: '#80f5ff', frameA: '#d5fdff', frameB: '#3cc9e8', payoutMin: 170, payoutVar: 90, xp: 52 },
+  [MATERIALS.RUBY]: { name: 'Ruby seam', baseColor: '#d9505e', frameA: '#ff9bab', frameB: '#a7243f', payoutMin: 140, payoutVar: 85, xp: 45 },
+  [MATERIALS.EMERALD]: { name: 'Emerald vein', baseColor: '#42c983', frameA: '#9fffd1', frameB: '#1f8f56', payoutMin: 135, payoutVar: 80, xp: 44 },
+  [MATERIALS.SAPPHIRE]: { name: 'Sapphire vein', baseColor: '#4e79de', frameA: '#a8c1ff', frameB: '#264cae', payoutMin: 145, payoutVar: 82, xp: 46 },
+  [MATERIALS.GEMSTONE]: { name: 'Gemstone deposit', baseColor: '#b767e8', frameA: '#efc6ff', frameB: '#7e33b6', payoutMin: 120, payoutVar: 78, xp: 41 },
+};
+
+const ANIMATED_MINERALS = new Set(Object.keys(MINERAL_DEFS).map((k) => Number(k)));
 
 const state = {
   world: new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT),
@@ -76,6 +93,8 @@ const state = {
   playerAnim: { bobPhase: 0, facing: 1 },
   // Active timed dig action (3 seconds) with a 5-frame animation.
   digAction: null,
+  // Smooth movement tween so each tile-to-tile step scrolls/animates cleanly.
+  moveAnim: null,
   stamina: MAX_STAMINA,
   maxStamina: MAX_STAMINA,
   restAction: null,
@@ -223,6 +242,36 @@ function wrappedStepDirection(fromX, toX) {
   const rightDist = (toX - fromX + WORLD_WIDTH) % WORLD_WIDTH;
   const leftDist = (fromX - toX + WORLD_WIDTH) % WORLD_WIDTH;
   return rightDist <= leftDist ? 1 : -1;
+}
+
+/** Smallest signed horizontal delta on a wrapping world (for smooth interpolation). */
+function shortestWrappedDelta(fromX, toX) {
+  const rightDist = (toX - fromX + WORLD_WIDTH) % WORLD_WIDTH;
+  const leftDist = (fromX - toX + WORLD_WIDTH) % WORLD_WIDTH;
+  return rightDist <= leftDist ? rightDist : -leftDist;
+}
+
+function startMoveAnimation(fromX, fromY, toX, toY, durationMs = 180) {
+  state.moveAnim = {
+    active: true,
+    startedAt: performance.now(),
+    durationMs,
+    fromX: wrapX(fromX),
+    fromY,
+    deltaX: shortestWrappedDelta(fromX, toX),
+    deltaY: toY - fromY,
+  };
+}
+
+function getAnimatedPlayerPosition(now = performance.now()) {
+  const anim = state.moveAnim;
+  if (!anim?.active) return { x: state.player.x, y: state.player.y };
+  const t = Math.min(1, (now - anim.startedAt) / anim.durationMs);
+  const eased = 1 - ((1 - t) ** 2);
+  const x = wrapX(anim.fromX + (anim.deltaX * eased));
+  const y = anim.fromY + (anim.deltaY * eased);
+  if (t >= 1) state.moveAnim = null;
+  return { x, y };
 }
 
 function getCell(x, y) {
@@ -379,6 +428,20 @@ function buildWorld(siteDef) {
         continue;
       }
 
+      // Deep mineral veins/deposits: broad contiguous pockets formed from layered noise bands.
+      const veinNoiseA = coordNoise(x * 2 + 71, y * 2 + 19, seed + 101);
+      const veinNoiseB = coordNoise(x + 913, Math.floor(y * 0.7), seed + 203);
+      const deepBand = Math.max(0, (undergroundDepth - 0.74) / 0.26);
+      if (deepBand > 0.02 && veinNoiseA > 0.61 && veinNoiseA < (0.76 + deepBand * 0.12)) {
+        if (veinNoiseB > 0.86) { world[idx] = MATERIALS.DIAMOND; continue; }
+        if (veinNoiseB > 0.74) { world[idx] = MATERIALS.SAPPHIRE; continue; }
+        if (veinNoiseB > 0.63) { world[idx] = MATERIALS.EMERALD; continue; }
+        if (veinNoiseB > 0.54) { world[idx] = MATERIALS.RUBY; continue; }
+        if (veinNoiseB > 0.46) { world[idx] = MATERIALS.GEMSTONE; continue; }
+        world[idx] = MATERIALS.GOLD;
+        continue;
+      }
+
       // Deep isolated lava pockets are initially contained by hard rock.
       const lavaChance = Math.max(0, undergroundDepth - 0.82) * 0.04;
       if (n > 0.62 && n < (0.62 + lavaChance) && deepNoise < 0.35) {
@@ -408,6 +471,12 @@ function getMaterialColor(type) {
     case MATERIALS.RELIC: return '#b57f5f';
     case MATERIALS.CRYSTAL: return '#68def2';
     case MATERIALS.LAVA: return '#ff6a2a';
+    case MATERIALS.GOLD: return MINERAL_DEFS[MATERIALS.GOLD].baseColor;
+    case MATERIALS.DIAMOND: return MINERAL_DEFS[MATERIALS.DIAMOND].baseColor;
+    case MATERIALS.RUBY: return MINERAL_DEFS[MATERIALS.RUBY].baseColor;
+    case MATERIALS.EMERALD: return MINERAL_DEFS[MATERIALS.EMERALD].baseColor;
+    case MATERIALS.SAPPHIRE: return MINERAL_DEFS[MATERIALS.SAPPHIRE].baseColor;
+    case MATERIALS.GEMSTONE: return MINERAL_DEFS[MATERIALS.GEMSTONE].baseColor;
     default: return '#0f1320';
   }
 }
@@ -700,10 +769,10 @@ function updateNpcDigger(now = performance.now()) {
   }
   if (m !== MATERIALS.EMPTY && !canDig(m, direction)) return;
 
-  if (m === MATERIALS.TREASURE || m === MATERIALS.RELIC || m === MATERIALS.CRYSTAL) {
-    const reward = m === MATERIALS.TREASURE ? 55 : m === MATERIALS.RELIC ? 95 : 70;
+  if (m === MATERIALS.TREASURE || m === MATERIALS.RELIC || m === MATERIALS.CRYSTAL || ANIMATED_MINERALS.has(m)) {
+    let reward = m === MATERIALS.TREASURE ? 55 : m === MATERIALS.RELIC ? 95 : m === MATERIALS.CRYSTAL ? 70 : MINERAL_DEFS[m].payoutMin;
     state.money += Math.floor(reward * (state.lootMultiplier || 1));
-    gainXp(12);
+    gainXp(12 + (ANIMATED_MINERALS.has(m) ? 6 : 0));
   }
   if (m !== MATERIALS.EMPTY) {
     setCell(nx, ny, MATERIALS.EMPTY);
@@ -786,6 +855,7 @@ function updateParticles() {
 
 function draw() {
   const now = performance.now();
+  const animatedPlayer = getAnimatedPlayerPosition(now);
   updateGrassSpread(now);
   updateLavaFlow(now);
   updateNpcDigger(now);
@@ -804,8 +874,8 @@ function draw() {
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
   // Camera centers on the player; at the surface we allow negative camera Y so the player stays centered.
-  state.camera.x = wrapX(state.player.x - Math.floor(viewportCols / 2));
-  const targetCameraY = state.player.y - Math.floor(viewportRows / 2);
+  state.camera.x = wrapX(animatedPlayer.x - Math.floor(viewportCols / 2));
+  const targetCameraY = animatedPlayer.y - Math.floor(viewportRows / 2);
   const topSkyRows = Math.max(0, Math.floor(viewportRows / 2) - 1);
   const minCameraY = -topSkyRows;
   state.camera.y = Math.max(minCameraY, Math.min(WORLD_HEIGHT - viewportRows, targetCameraY));
@@ -867,6 +937,20 @@ function draw() {
         ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, tileSize - 4));
       }
 
+      if (ANIMATED_MINERALS.has(material)) {
+        const mineral = MINERAL_DEFS[material];
+        const frame = Math.floor((performance.now() / 280) + ((wx + wy) * 0.25)) % 2;
+        const frameColor = frame === 0 ? mineral.frameA : mineral.frameB;
+        const shardSize = Math.max(3, Math.floor(tileSize * 0.28));
+        const centerX = px + Math.floor((tileSize - shardSize) / 2);
+        const centerY = py + Math.floor((tileSize - shardSize) / 2);
+        // Two-step animated shard frame keeps each mineral visually distinct and lively.
+        ctx.fillStyle = frameColor;
+        ctx.fillRect(centerX, centerY, shardSize, shardSize);
+        ctx.fillRect(px + 3, py + 3, Math.max(2, Math.floor(shardSize * 0.65)), Math.max(2, Math.floor(shardSize * 0.65)));
+        ctx.fillRect(px + tileSize - shardSize - 3, py + tileSize - shardSize - 3, Math.max(2, Math.floor(shardSize * 0.62)), Math.max(2, Math.floor(shardSize * 0.62)));
+      }
+
       if (material === MATERIALS.TREASURE) {
         const twinkle = (Math.sin((performance.now() / 220) + ((wx + wy) * 0.3)) + 1) / 2;
         const gemSize = Math.max(4, Math.floor(tileSize * (0.28 + twinkle * 0.14)));
@@ -917,9 +1001,9 @@ function draw() {
 
   // Convert world X -> viewport X with wrap awareness so edge-crossing never places
   // the player sprite off-screen when camera.x wrapped to the other side.
-  const playerViewportX = wrapX(state.player.x - state.camera.x);
+  const playerViewportX = wrapX(animatedPlayer.x - state.camera.x);
   const playerScreenX = offsetX + (playerViewportX * tileSize);
-  const playerScreenY = offsetY + ((state.player.y - state.camera.y) * tileSize);
+  const playerScreenY = offsetY + ((animatedPlayer.y - state.camera.y) * tileSize);
   const bob = Math.sin(state.playerAnim.bobPhase) * Math.max(1, tileSize * 0.05);
   const px = playerScreenX;
   const py = playerScreenY + bob;
@@ -1202,7 +1286,7 @@ function updateHud() {
 }
 
 function canDig(material, direction) {
-  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) return true;
+  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE].includes(material)) return true;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
   if (material === MATERIALS.GRANITE) return state.canDigRock;
@@ -1253,6 +1337,18 @@ function collectCrystal(siteDef, x, y) {
   setMessage(`Crystal cache recovered! +$${payout}${bonusBomb ? ' +1 bonus bomb!' : ''}`);
 }
 
+/** Collect from deep mineral veins/deposits with unique payouts and XP. */
+function collectMineral(siteDef, x, y, material) {
+  const def = MINERAL_DEFS[material];
+  if (!def) return;
+  const payout = Math.floor((def.payoutMin + (Math.random() * def.payoutVar)) * (state.lootMultiplier || 1));
+  state.money += payout;
+  gainXp(def.xp * siteDef.xpBonus);
+  spawnParticles(x, y, def.frameA, 16, 1.25);
+  playSfx('treasure');
+  setMessage(`${def.name} mined! +$${payout}`);
+}
+
 function digCell(x, y, direction, siteDef) {
   if (!inBounds(x, y)) return false;
   const material = getCell(x, y);
@@ -1269,6 +1365,7 @@ function digCell(x, y, direction, siteDef) {
   if (material === MATERIALS.TREASURE) collectTreasure(siteDef, x, y);
   if (material === MATERIALS.RELIC) collectRelic(siteDef, x, y);
   if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
+  if (ANIMATED_MINERALS.has(material)) collectMineral(siteDef, x, y, material);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
     // Reverse origin spray so chunks kick back opposite the current dig direction.
@@ -1350,11 +1447,15 @@ function dyFromDirection(direction) {
 }
 
 function completeMove(nx, ny, dy, siteDef) {
+  const prevX = state.player.x;
+  const prevY = state.player.y;
   state.playerAnim.bobPhase += 0.85;
-  state.playerAnim.facing = nx < state.player.x ? -1 : nx > state.player.x ? 1 : state.playerAnim.facing;
+  const horizontalDelta = shortestWrappedDelta(state.player.x, nx);
+  state.playerAnim.facing = horizontalDelta < 0 ? -1 : horizontalDelta > 0 ? 1 : state.playerAnim.facing;
   state.player.x = nx;
   state.player.y = ny;
   state.maxDepth = Math.max(state.maxDepth, ny);
+  startMoveAnimation(prevX, prevY, nx, ny);
   markVisibleArea(state.player.x, state.player.y);
 
   if (dy === 0 && state.digRadius > 1) {
@@ -1428,6 +1529,13 @@ function movePlayer(dx, dy) {
   }
 
   if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+    // Emergency movement rule: with zero stamina, upward movement through loose sand is allowed.
+    if (direction === 'up' && targetMaterial === MATERIALS.SAND) {
+      setCell(nx, ny, MATERIALS.EMPTY);
+      state.lastMoveAt = now;
+      completeMove(nx, ny, dy, siteDef);
+      return;
+    }
     triggerStaminaWarning();
     setMessage('No stamina. Return to the cottage (🛖) and rest for 10s.', 'danger');
     playSfx('blocked');
@@ -1653,6 +1761,7 @@ function startSelectedSite() {
     if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
+    state.moveAnim = null;
     state.particles = [];
     state.maxStamina = MAX_STAMINA;
     state.stamina = state.maxStamina;
