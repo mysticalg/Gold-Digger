@@ -92,6 +92,7 @@ const state = {
   npc: { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 },
   // Short-lived in-board warning cue shown when the player tries to dig with zero stamina.
   staminaWarningUntil: 0,
+  lastLowStaminaWarnAt: 0,
 };
 
 const upgrades = [
@@ -798,6 +799,9 @@ function draw() {
   const minCameraY = -topSkyRows;
   state.camera.y = Math.max(minCameraY, Math.min(WORLD_HEIGHT - viewportRows, targetCameraY));
 
+  // Auto-rest should begin as soon as the player is idle on cottage with missing stamina.
+  if (isAtCottage() && state.stamina < state.maxStamina && !state.restAction?.active && !state.digAction?.active) startRest();
+
   drawSurface(tileSize, viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx);
 
   // Apply underground vignette only below the surface horizon so the blue sky stays visible.
@@ -1048,6 +1052,7 @@ function triggerStaminaWarning() {
 
 function clearRestAction() {
   if (state.restAction?.timer) clearTimeout(state.restAction.timer);
+  if (state.restAction?.tickTimer) clearInterval(state.restAction.tickTimer);
   state.restAction = null;
 }
 
@@ -1055,37 +1060,48 @@ function clearRestAction() {
  * Resting is only allowed inside the cottage tile on the surface.
  * The digger remains responsive (render loop runs) while a 10s timer refills stamina.
  */
-function startRest() {
+function startRest(manual = false) {
   if (state.gameOver || state.digAction?.active) return;
-  if (state.restAction?.active) {
-    setMessage('Already resting in the cottage...', 'good');
-    return;
-  }
+  if (state.restAction?.active) return;
   if (!isAtCottage()) {
-    setMessage('Go to the cottage (🛖) tile to rest.', 'danger');
-    playSfx('blocked');
+    if (manual) setMessage('Go to the cottage (🛖) tile to rest.', 'danger');
     return;
   }
   if (state.stamina >= state.maxStamina) {
-    setMessage('Stamina is already full.');
+    if (manual) setMessage('Stamina is already full.');
     return;
   }
 
+  const missing = Math.max(1, state.maxStamina - state.stamina);
+  const tickMs = Math.max(250, Math.floor(REST_DURATION_MS / missing));
   state.restAction = {
     active: true,
     startedAt: performance.now(),
     durationMs: REST_DURATION_MS,
+    tickMs,
     timer: null,
+    tickTimer: null,
   };
-  setMessage('Resting in cottage... 10 seconds to full stamina.');
+  setMessage('Auto-resting in cottage... stamina refilling.', 'good');
   updateHud();
+
+  state.restAction.tickTimer = setInterval(() => {
+    if (!state.restAction?.active) return;
+    state.stamina = Math.min(state.maxStamina, state.stamina + 1);
+    updateHud();
+    if (state.stamina >= state.maxStamina) {
+      clearRestAction();
+      setMessage('Fully rested! Stamina restored.');
+      updateHud();
+    }
+  }, tickMs);
 
   state.restAction.timer = setTimeout(() => {
     state.stamina = state.maxStamina;
     clearRestAction();
     setMessage('Fully rested! Stamina restored.');
     updateHud();
-  }, REST_DURATION_MS);
+  }, REST_DURATION_MS + 120);
 }
 
 function setMessage(msg, tone = 'good') {
@@ -1097,6 +1113,22 @@ function xpToNextLevel() {
   return 100 + ((state.level - 1) * 70);
 }
 
+/** Stamina cap scales with level progression so longer digs become possible later on. */
+function recalculateMaxStamina() {
+  const newMax = MAX_STAMINA + Math.floor((state.level - 1) / 2);
+  const previousMax = state.maxStamina;
+  state.maxStamina = newMax;
+  if (newMax > previousMax) state.stamina += (newMax - previousMax);
+  state.stamina = Math.min(state.maxStamina, state.stamina);
+}
+
+function maybeWarnLowStamina(now = performance.now()) {
+  if (state.stamina > 3 || state.restAction?.active) return;
+  if (now - state.lastLowStaminaWarnAt < 4500) return;
+  state.lastLowStaminaWarnAt = now;
+  setMessage('⚠️ Low stamina (3 or less). Head to the cottage to auto-rest soon.', 'danger');
+}
+
 function gainXp(amount) {
   state.xp += amount;
   let didLevelUp = false;
@@ -1105,6 +1137,7 @@ function gainXp(amount) {
     state.level += 1;
     state.money += 45;
     didLevelUp = true;
+    recalculateMaxStamina();
     playSfx('levelup');
     setMessage(`Level up! You are now level ${state.level}. +$45 sponsor bonus.`);
   }
@@ -1139,7 +1172,20 @@ function updateHud() {
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
   $('status').textContent = state.gameOver ? 'Game Over' : state.restAction?.active ? 'Resting' : 'Active';
-  $('rest-btn').disabled = state.gameOver || state.restAction?.active || !isAtCottage() || state.stamina >= state.maxStamina || !!state.digAction?.active;
+  $('rest-btn').disabled = state.gameOver || !isAtCottage() || state.stamina >= state.maxStamina || !!state.digAction?.active;
+
+  const progressFill = $('rest-progress-fill');
+  const progressText = $('rest-progress-text');
+  if (state.restAction?.active) {
+    const elapsed = performance.now() - state.restAction.startedAt;
+    const progress = Math.min(1, elapsed / state.restAction.durationMs);
+    progressFill.style.width = `${Math.round(progress * 100)}%`;
+    progressText.textContent = `Resting ${Math.round(progress * 100)}%`;
+  } else {
+    progressFill.style.width = state.stamina >= state.maxStamina ? '100%' : '0%';
+    progressText.textContent = state.stamina >= state.maxStamina ? 'Ready' : 'Needs Rest';
+  }
+
   renderShop();
 }
 
@@ -1218,6 +1264,7 @@ function digCell(x, y, direction, siteDef) {
     playSfx('dig');
     gainXp(7 * siteDef.xpBonus);
     spendStamina(1);
+    maybeWarnLowStamina();
   }
   return true;
 }
@@ -1305,6 +1352,8 @@ function completeMove(nx, ny, dy, siteDef) {
   settleColumn(nx);
   settleColumn(state.player.x);
   settleSurfaceLandmarks();
+  if (isAtCottage() && state.stamina < state.maxStamina) startRest();
+  maybeWarnLowStamina();
   updateHud();
   draw();
 
@@ -1343,10 +1392,7 @@ function endGameFromTrap() {
 
 function movePlayer(dx, dy) {
   if (state.gameOver || state.digAction?.active) return;
-  if (state.restAction?.active) {
-    setMessage('You are resting. Wait for stamina to refill.', 'danger');
-    return;
-  }
+  if (state.restAction?.active) clearRestAction();
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
 
@@ -1495,8 +1541,11 @@ function startSelectedSite() {
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
     state.particles = [];
+    state.maxStamina = MAX_STAMINA;
     state.stamina = state.maxStamina;
+    recalculateMaxStamina();
     state.staminaWarningUntil = 0;
+    state.lastLowStaminaWarnAt = 0;
     state.lastGrassSpreadAt = 0;
     initLavaSourcesFromWorld();
     clearRestAction();
@@ -1527,7 +1576,7 @@ function bindUi() {
     updateHud();
     draw();
   });
-  $('rest-btn').addEventListener('click', startRest);
+  $('rest-btn').addEventListener('click', () => startRest(true));
   $('water-btn').addEventListener('click', useWater);
   $('sfx-btn').addEventListener('click', () => {
     state.sfxEnabled = !state.sfxEnabled;
@@ -1553,7 +1602,7 @@ function bindUi() {
       updateHud();
       draw();
     }
-    if (key === 'r') startRest();
+    if (key === 'r') startRest(true);
     if (key === 'q') useWater();
     if (key === 'm') {
       state.sfxEnabled = !state.sfxEnabled;
