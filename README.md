@@ -25,6 +25,7 @@ Gold Digger is a retro-style browser mining game with a looping world, upgrade p
 - Grass spreads only into adjacent empty tiles (including diagonals) when that tile has sand directly underneath.
 - Return to the cottage to refill stamina (auto-rest starts immediately there).
 - Low stamina warnings appear at 3 points remaining, and your stamina cap increases as you level up.
+- Deep layers contain large veins/deposits of gold, diamonds, rubies, emeralds, sapphires, gemstones, and other rich materials.
 - Deep lava leaks can spread when opened; use water from the well to cool lava into granite.
 - You can hire an NPC digger in the shop to auto-mine and collect loot for you.
 - Buy upgrades while standing on the shop tile.
