@@ -376,6 +376,31 @@ function spawnParticles(worldX, worldY, color, count = 8, force = 1) {
   }
 }
 
+/**
+ * Emits short-lived dirt chunks from the current dig target while the 3 second dig is active.
+ * This keeps the animation feeling alive instead of only bursting once at completion.
+ */
+function spawnDigDustBurst(action) {
+  if (!action?.active) return;
+  const material = getCell(action.targetX, action.targetY);
+  if (material === MATERIALS.EMPTY) return;
+
+  // Push the dust away from the miner so the spray direction matches the shovel swing.
+  const sprayDir = state.playerAnim.facing > 0 ? 1 : -1;
+  const count = 2 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < count; i += 1) {
+    state.particles.push({
+      x: action.targetX + 0.5 + ((Math.random() - 0.5) * 0.5),
+      y: action.targetY + 0.35 + (Math.random() * 0.35),
+      vx: ((0.02 + Math.random() * 0.08) * sprayDir) + ((Math.random() - 0.5) * 0.03),
+      vy: -(0.03 + Math.random() * 0.1),
+      life: 0.65 + (Math.random() * 0.25),
+      color: getMaterialColor(material),
+      size: 0.09 + Math.random() * 0.1,
+    });
+  }
+}
+
 function updateParticles() {
   for (let i = state.particles.length - 1; i >= 0; i -= 1) {
     const p = state.particles[i];
@@ -478,12 +503,29 @@ function draw() {
   ctx.fillRect(px + Math.floor(tileSize * 0.3), py + Math.floor(tileSize * 0.3), Math.max(4, Math.floor(tileSize * 0.38)), Math.max(3, Math.floor(tileSize * 0.22)));
   ctx.fillStyle = '#2a5daa';
   ctx.fillRect(px + Math.floor(tileSize * 0.25), py + Math.floor(tileSize * 0.54), Math.max(5, Math.floor(tileSize * 0.5)), Math.max(4, Math.floor(tileSize * 0.31)));
-  ctx.fillStyle = '#9ea9c4';
-  const basePickOffset = state.playerAnim.facing > 0 ? 0.74 : 0.08;
+  // Draw a larger, higher-contrast shovel so it is visible during movement and digging.
+  const basePickOffset = state.playerAnim.facing > 0 ? 0.72 : 0.06;
   const directionalSwing = state.playerAnim.facing > 0 ? pickSwing : -pickSwing;
   const pickOffset = Math.max(0.02, Math.min(0.84, basePickOffset + directionalSwing));
-  const pickHeight = isDigging ? 0.46 + (digFrame * 0.03) : 0.54;
-  ctx.fillRect(px + Math.floor(tileSize * pickOffset), py + Math.floor(tileSize * pickHeight), Math.max(2, Math.floor(tileSize * 0.16)), Math.max(4, Math.floor(tileSize * 0.38)));
+  const pickHeight = isDigging ? 0.42 + (digFrame * 0.035) : 0.5;
+  const handleX = px + Math.floor(tileSize * pickOffset);
+  const handleY = py + Math.floor(tileSize * pickHeight);
+  const handleW = Math.max(2, Math.floor(tileSize * 0.12));
+  const handleH = Math.max(6, Math.floor(tileSize * 0.44));
+
+  ctx.fillStyle = '#8b5a2b';
+  ctx.fillRect(handleX, handleY, handleW, handleH);
+  ctx.fillStyle = '#2a1200';
+  ctx.fillRect(handleX, handleY, handleW, Math.max(1, Math.floor(tileSize * 0.05)));
+
+  const bladeW = Math.max(5, Math.floor(tileSize * 0.32));
+  const bladeH = Math.max(4, Math.floor(tileSize * 0.2));
+  const bladeX = state.playerAnim.facing > 0 ? handleX + handleW - 1 : handleX - bladeW + 1;
+  const bladeY = handleY + handleH - Math.max(3, Math.floor(tileSize * 0.14));
+  ctx.fillStyle = '#d6deef';
+  ctx.fillRect(bladeX, bladeY, bladeW, bladeH);
+  ctx.fillStyle = '#9ea9c4';
+  ctx.fillRect(bladeX, bladeY, bladeW, Math.max(1, Math.floor(tileSize * 0.05)));
 
   // Progress ring around player while a 3-second dig is in progress.
   if (isDigging) {
@@ -651,6 +693,7 @@ function beginTimedDig(nx, ny, direction, siteDef) {
     siteDef,
     frame: 0,
     sfxTimer: null,
+    dustTimer: null,
     doneTimer: null,
   };
 
@@ -664,12 +707,19 @@ function beginTimedDig(nx, ny, direction, siteDef) {
     playSfx('dig-loop');
   }, frameIntervalMs);
 
+  // Extra dirt spray while actively digging adds feedback for each shovel stroke.
+  state.digAction.dustTimer = setInterval(() => {
+    if (!state.digAction?.active) return;
+    spawnDigDustBurst(state.digAction);
+  }, 110);
+
   setMessage('Digging block... (3s)');
 
   state.digAction.doneTimer = setTimeout(() => {
     const activeDig = state.digAction;
     if (!activeDig?.active) return;
     if (activeDig.sfxTimer) clearInterval(activeDig.sfxTimer);
+    if (activeDig.dustTimer) clearInterval(activeDig.dustTimer);
 
     const didDig = digCell(nx, ny, direction, siteDef);
     state.digAction = null;
@@ -847,6 +897,7 @@ function startSelectedSite() {
     state.bombPackBonus = 0;
     state.lootMultiplier = 1;
     if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
+    if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
     state.particles = [];
