@@ -21,7 +21,7 @@ Gold Digger is a retro-style browser mining game with a looping world, upgrade p
 ## Core Gameplay Notes
 - The world loops horizontally, so moving past one side wraps to the other.
 - Surface landmarks (🛖 cottage and 🛒 shop) are world objects and can drop if their support is mined away.
-- Grass regrows after a short cooldown.
+- Grass spreads only into adjacent empty tiles (including diagonals) when that tile has sand directly underneath.
 - Return to the cottage to refill stamina.
 - Buy upgrades while standing on the shop tile.
 

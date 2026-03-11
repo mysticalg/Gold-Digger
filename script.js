@@ -11,7 +11,7 @@ const TILE_SIZE = 16;
 const FOW_SIGHT_RADIUS = 5;
 const MAX_STAMINA = 12;
 const REST_DURATION_MS = 10000;
-const GRASS_REGROW_MS = 30000;
+const GRASS_SPREAD_INTERVAL_MS = 1000;
 const STAMINA_WARNING_MS = 1800;
 
 // Surface buildings placed next to each other at the top lane.
@@ -74,8 +74,8 @@ const state = {
   stamina: MAX_STAMINA,
   maxStamina: MAX_STAMINA,
   restAction: null,
-  // Tracks pending regrowth timers so grass returns 30 seconds after mining.
-  grassRegrowTimers: new Map(),
+  // Timestamp throttle for sand-supported grass spreading checks.
+  lastGrassSpreadAt: 0,
   // Cottage/shop are physical landmark tiles that can drop if the column under them is mined away.
   surfaceLandmarks: {
     [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
@@ -467,18 +467,38 @@ function drawSurfaceIconTile(px, py, tileSize, tileColor, icon) {
   ctx.textBaseline = 'alphabetic';
 }
 
-/** Grass at the surface grows back after a fixed cooldown to keep the map readable. */
-function scheduleGrassRegrowth(x, y) {
-  const key = `${wrapX(x)},${y}`;
-  const previousTimer = state.grassRegrowTimers.get(key);
-  if (previousTimer) clearTimeout(previousTimer);
+/**
+ * Grass spreading rule:
+ * - an empty tile can grow grass only if there is SAND directly below it
+ * - growth requires at least one neighboring grass tile (8-way, including diagonals)
+ */
+function canGrassSpreadTo(x, y) {
+  if (!inBounds(x, y)) return false;
+  if (getCell(x, y) !== MATERIALS.EMPTY) return false;
+  if (getCell(x, y + 1) !== MATERIALS.SAND) return false;
 
-  const timer = setTimeout(() => {
-    state.grassRegrowTimers.delete(key);
-    if (getCell(x, y) === MATERIALS.EMPTY) setCell(x, y, MATERIALS.GRASS);
-  }, GRASS_REGROW_MS);
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if (dx === 0 && dy === 0) continue;
+      if (getCell(x + dx, y + dy) === MATERIALS.GRASS) return true;
+    }
+  }
+  return false;
+}
 
-  state.grassRegrowTimers.set(key, timer);
+function updateGrassSpread(now = performance.now()) {
+  if (now - state.lastGrassSpreadAt < GRASS_SPREAD_INTERVAL_MS) return;
+  state.lastGrassSpreadAt = now;
+
+  const newGrass = [];
+  for (let y = 0; y < WORLD_HEIGHT - 1; y += 1) {
+    for (let x = 0; x < WORLD_WIDTH; x += 1) {
+      if (!canGrassSpreadTo(x, y)) continue;
+      if (Math.random() < 0.34) newGrass.push([x, y]);
+    }
+  }
+
+  for (const [x, y] of newGrass) setCell(x, y, MATERIALS.GRASS);
 }
 
 /**
@@ -551,6 +571,8 @@ function updateParticles() {
 }
 
 function draw() {
+  const now = performance.now();
+  updateGrassSpread(now);
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -949,7 +971,6 @@ function digCell(x, y, direction, siteDef) {
   if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
-    if (material === MATERIALS.GRASS) scheduleGrassRegrowth(x, y);
     // Reverse origin spray so chunks kick back opposite the current dig direction.
     spawnParticles(x, y, getMaterialColor(material), 8, 1.05, state.player.x, state.player.y, true);
     playSfx('dig');
@@ -1203,10 +1224,6 @@ function startSelectedSite() {
   setMessage('Generating 200x1000 looping world...');
 
   setTimeout(() => {
-    // Reset pending grass regrowth when starting/restarting an expedition.
-    for (const timer of state.grassRegrowTimers.values()) clearTimeout(timer);
-    state.grassRegrowTimers.clear();
-
     state.world = buildWorld(siteDef);
     state.explored = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
     state.player = { x: Math.floor(WORLD_WIDTH / 2), y: 0 };
@@ -1226,6 +1243,7 @@ function startSelectedSite() {
     state.particles = [];
     state.stamina = state.maxStamina;
     state.staminaWarningUntil = 0;
+    state.lastGrassSpreadAt = 0;
     clearRestAction();
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
