@@ -262,6 +262,7 @@ const canvas = $('game-canvas');
 const ctx = canvas.getContext('2d');
 const siteSelect = $('site-select');
 const messageBox = $('message');
+const shopPanel = $('shop-panel');
 let audioCtx;
 
 function indexOf(x, y) {
@@ -926,11 +927,13 @@ function draw() {
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const fixedTiles = state.zoom20x20 ? 20 : null;
+  const fixedRows = state.zoom20x20 ? 20 : null;
+  // In 20x20 zoom mode, lock vertical rows to 20 but let columns expand with the canvas width.
+  // This keeps the board full-width on wide windows instead of forcing a centered square viewport.
+  const tileSize = fixedRows ? Math.max(8, Math.floor(canvas.height / fixedRows)) : TILE_SIZE;
   // Keep visible tile count tight so player can stay centered unless clamped by world edges.
-  const viewportCols = fixedTiles ?? Math.ceil(canvas.width / TILE_SIZE);
-  const viewportRows = fixedTiles ?? Math.ceil(canvas.height / TILE_SIZE);
-  const tileSize = fixedTiles ? Math.floor(Math.min(canvas.width, canvas.height) / fixedTiles) : TILE_SIZE;
+  const viewportRows = fixedRows ?? Math.ceil(canvas.height / TILE_SIZE);
+  const viewportCols = fixedRows ? Math.max(fixedRows, Math.ceil(canvas.width / tileSize)) : Math.ceil(canvas.width / TILE_SIZE);
   const boardWidthPx = viewportCols * tileSize;
   const boardHeightPx = viewportRows * tileSize;
   const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
@@ -1410,6 +1413,11 @@ function gainXp(amount) {
 }
 
 function updateHud() {
+  const atShop = isAtShop();
+  // Hide the entire Miner Shop panel unless the player is standing on the shop tile.
+  shopPanel.classList.toggle('is-hidden', !atShop);
+  shopPanel.setAttribute('aria-hidden', atShop ? 'false' : 'true');
+
   $('money').textContent = Math.floor(state.money);
   $('level').textContent = state.level;
   $('xp').textContent = Math.floor(state.xp);
@@ -1892,12 +1900,8 @@ function renderShop() {
   const container = $('shop-items');
   container.innerHTML = '';
 
-  if (!isAtShop()) {
-    const hint = document.createElement('p');
-    hint.className = 'shop-hint';
-    hint.textContent = 'Stand on the 🛒 shop tile to reveal all buy buttons.';
-    container.appendChild(hint);
-  }
+  // Keep shop completely hidden unless the player is physically on the shop landmark tile.
+  if (!isAtShop()) return;
 
   upgrades.forEach((upgrade) => {
     const cost = Math.floor(upgrade.baseCost * (1 + ((state.level - 1) * 0.1)));
