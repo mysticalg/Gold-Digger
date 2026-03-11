@@ -11,6 +11,7 @@ const TILE_SIZE = 16;
 const FOW_SIGHT_RADIUS = 5;
 const MAX_STAMINA = 12;
 const REST_DURATION_MS = 10000;
+const GRASS_REGROW_MS = 30000;
 
 // Surface buildings placed next to each other at the top lane.
 const SURFACE_SPOTS = {
@@ -67,6 +68,8 @@ const state = {
   stamina: MAX_STAMINA,
   maxStamina: MAX_STAMINA,
   restAction: null,
+  // Tracks pending regrowth timers so grass returns 30 seconds after mining.
+  grassRegrowTimers: new Map(),
 };
 
 const upgrades = [
@@ -351,26 +354,82 @@ function resizeCanvasToDisplaySize() {
   }
 }
 
-function drawSurface(tileSize, _viewportCols, offsetX, offsetY) {
-  const horizon = Math.max(42, Math.floor(canvas.height * 0.16));
-  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
-  sky.addColorStop(0, '#78c8ff');
-  sky.addColorStop(1, '#bce9ff');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, canvas.width, horizon);
+function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx) {
+  // Draw sky/soil inside the board bounds so the terrain and background start at the same point.
+  const boardTop = offsetY;
+  const boardBottom = offsetY + boardHeightPx;
+  const grassRowScreenY = offsetY + ((1 - state.camera.y) * tileSize);
+  const surfaceSkyHorizon = offsetY + Math.floor(boardHeightPx * 0.5);
+  const useSurfaceSkyView = state.player.y <= 1;
+  const rawHorizon = useSurfaceSkyView
+    ? Math.max(grassRowScreenY, surfaceSkyHorizon)
+    : grassRowScreenY;
+  const horizon = Math.max(boardTop, Math.min(boardBottom, rawHorizon));
 
+  const sky = ctx.createLinearGradient(0, boardTop, 0, horizon || (boardTop + 1));
+  // Brighter daytime sky palette for a clearer above-ground mood.
+  sky.addColorStop(0, '#58b8ff');
+  sky.addColorStop(0.55, '#87d4ff');
+  sky.addColorStop(1, '#bfe9ff');
+  ctx.fillStyle = sky;
+  ctx.fillRect(offsetX, boardTop, boardWidthPx, Math.max(0, horizon - boardTop));
+
+  // Fill below the horizon with earth tones so terrain always reads below the grass strip.
+  const soil = ctx.createLinearGradient(0, horizon, 0, boardBottom);
+  soil.addColorStop(0, '#2a3627');
+  soil.addColorStop(1, '#171823');
+  ctx.fillStyle = soil;
+  ctx.fillRect(offsetX, horizon, boardWidthPx, Math.max(0, boardBottom - horizon));
+
+  // Keep the sun in the visible sky band (never below the computed horizon line).
   const pulse = 0.08 * Math.sin(performance.now() / 620);
-  ctx.fillStyle = `rgba(255, 225, 91, ${0.35 + pulse})`;
+  const sunY = Math.max(boardTop + 42, Math.min(horizon - 28, boardTop + Math.floor((horizon - boardTop) * 0.35)));
+  const sunX = offsetX + boardWidthPx - 95;
+
+  // Bloom halo uses layered radial gradients for a soft glow without expensive full-screen blur.
+  const bloomRadius = 150 + (pulse * 18);
+  const bloom = ctx.createRadialGradient(sunX, sunY, 12, sunX, sunY, bloomRadius);
+  bloom.addColorStop(0, 'rgba(255, 250, 190, 0.58)');
+  bloom.addColorStop(0.35, 'rgba(255, 226, 120, 0.33)');
+  bloom.addColorStop(0.75, 'rgba(255, 198, 86, 0.14)');
+  bloom.addColorStop(1, 'rgba(255, 180, 66, 0)');
+  ctx.fillStyle = bloom;
+  ctx.fillRect(offsetX, boardTop, boardWidthPx, Math.max(0, horizon - boardTop));
+
+  // Short sun-ray sweep for extra shine while keeping animation subtle.
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = `rgba(255, 226, 132, ${0.22 + (pulse * 0.22)})`;
+  ctx.lineWidth = 2;
+  const rays = 10;
+  const rayInner = 34;
+  const rayOuter = 64 + (pulse * 10);
+  for (let i = 0; i < rays; i += 1) {
+    const angle = ((Math.PI * 2) / rays) * i + (performance.now() / 2800);
+    ctx.beginPath();
+    ctx.moveTo(sunX + (Math.cos(angle) * rayInner), sunY + (Math.sin(angle) * rayInner));
+    ctx.lineTo(sunX + (Math.cos(angle) * rayOuter), sunY + (Math.sin(angle) * rayOuter));
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.fillStyle = `rgba(255, 225, 91, ${0.38 + pulse})`;
   ctx.beginPath();
-  ctx.arc(canvas.width - 95, 70, 48, 0, Math.PI * 2);
+  ctx.arc(sunX, sunY, 48, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = '#ffdf55';
   ctx.beginPath();
-  ctx.arc(canvas.width - 95, 70, 28, 0, Math.PI * 2);
+  ctx.arc(sunX, sunY, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 220, 0.55)';
+  ctx.beginPath();
+  ctx.arc(sunX - 8, sunY - 8, 9, 0, Math.PI * 2);
   ctx.fill();
 
+  // Surface band is locked to the grass row for cleaner separation of sky and underground.
+  const bandHeight = Math.max(4, Math.floor(tileSize * 0.25));
   ctx.fillStyle = '#2f8d40';
-  ctx.fillRect(0, horizon - 10, canvas.width, 10);
+  ctx.fillRect(offsetX, Math.max(boardTop, horizon - bandHeight), boardWidthPx, bandHeight);
 
   // Draw cottage and shop at y=0 so navigation targets are visible.
   const surfaceY = 0;
@@ -396,6 +455,34 @@ function drawSurfaceBuilding(screenX, screenY, tileSize, color, emoji) {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#fff4d0';
   ctx.fillText(emoji, x + (w / 2), y + h - Math.max(2, Math.floor(h * 0.2)));
+}
+
+/** Draw an always-visible icon tile for surface landmarks on the board itself. */
+function drawSurfaceIconTile(px, py, tileSize, tileColor, icon) {
+  ctx.fillStyle = tileColor;
+  ctx.fillRect(px + 1, py + 1, tileSize - 2, tileSize - 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(px + 2, py + 2, tileSize - 4, Math.max(2, Math.floor(tileSize * 0.18)));
+  ctx.font = `${Math.max(11, Math.floor(tileSize * 0.8))}px Trebuchet MS`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fffdf5';
+  ctx.fillText(icon, px + (tileSize / 2), py + (tileSize / 2) + 0.5);
+  ctx.textBaseline = 'alphabetic';
+}
+
+/** Grass at the surface grows back after a fixed cooldown to keep the map readable. */
+function scheduleGrassRegrowth(x, y) {
+  const key = `${wrapX(x)},${y}`;
+  const previousTimer = state.grassRegrowTimers.get(key);
+  if (previousTimer) clearTimeout(previousTimer);
+
+  const timer = setTimeout(() => {
+    state.grassRegrowTimers.delete(key);
+    if (getCell(x, y) === MATERIALS.EMPTY) setCell(x, y, MATERIALS.GRASS);
+  }, GRASS_REGROW_MS);
+
+  state.grassRegrowTimers.set(key, timer);
 }
 
 /**
@@ -481,11 +568,14 @@ function draw() {
   const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
-  // Camera centers on the player and only stops centering when we hit map boundaries.
+  // Camera centers on the player; at the surface we allow negative camera Y so the player stays centered.
   state.camera.x = wrapX(state.player.x - Math.floor(viewportCols / 2));
-  state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
+  const targetCameraY = state.player.y - Math.floor(viewportRows / 2);
+  const topSkyRows = Math.max(0, Math.floor(viewportRows / 2) - 1);
+  const minCameraY = -topSkyRows;
+  state.camera.y = Math.max(minCameraY, Math.min(WORLD_HEIGHT - viewportRows, targetCameraY));
 
-  drawSurface(tileSize, viewportCols, offsetX, offsetY);
+  drawSurface(tileSize, viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx);
 
   const boardGlow = ctx.createLinearGradient(offsetX, offsetY, offsetX, offsetY + boardHeightPx);
   boardGlow.addColorStop(0, '#24172e');
@@ -502,13 +592,19 @@ function draw() {
       const material = getCell(wx, wy);
       const px = offsetX + (vx * tileSize);
       const py = offsetY + (vy * tileSize);
-
       ctx.fillStyle = getMaterialColor(material);
       ctx.fillRect(px, py, tileSize, tileSize);
 
       if (material !== MATERIALS.EMPTY) {
         ctx.fillStyle = 'rgba(0,0,0,0.18)';
         ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, Math.floor(tileSize * 0.18)));
+      }
+
+      // Overlay landmark icons so cottage/shop remain visible while on the surface lane.
+      if (wy === 0 && wx === wrapX(SURFACE_SPOTS.cottageX)) {
+        drawSurfaceIconTile(px, py, tileSize, '#8e5a31', '🛖');
+      } else if (wy === 0 && wx === wrapX(SURFACE_SPOTS.shopX)) {
+        drawSurfaceIconTile(px, py, tileSize, '#366fb0', '🛒');
       }
 
       if (material === MATERIALS.TREASURE) {
@@ -784,6 +880,7 @@ function digCell(x, y, direction, siteDef) {
   if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
+    if (material === MATERIALS.GRASS) scheduleGrassRegrowth(x, y);
     // Reverse origin spray so chunks kick back opposite the current dig direction.
     spawnParticles(x, y, getMaterialColor(material), 8, 1.05, state.player.x, state.player.y, true);
     playSfx('dig');
@@ -1033,6 +1130,10 @@ function startSelectedSite() {
   setMessage('Generating 200x1000 looping world...');
 
   setTimeout(() => {
+    // Reset pending grass regrowth when starting/restarting an expedition.
+    for (const timer of state.grassRegrowTimers.values()) clearTimeout(timer);
+    state.grassRegrowTimers.clear();
+
     state.world = buildWorld(siteDef);
     state.explored = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
     state.player = { x: Math.floor(WORLD_WIDTH / 2), y: 0 };
