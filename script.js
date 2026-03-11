@@ -19,6 +19,11 @@ const SURFACE_SPOTS = {
   shopX: Math.floor(WORLD_WIDTH / 2),
 };
 
+const LANDMARK_IDS = {
+  COTTAGE: 'cottage',
+  SHOP: 'shop',
+};
+
 const MATERIALS = {
   EMPTY: 0,
   SAND: 1,
@@ -70,6 +75,11 @@ const state = {
   restAction: null,
   // Tracks pending regrowth timers so grass returns 30 seconds after mining.
   grassRegrowTimers: new Map(),
+  // Cottage/shop are physical landmark tiles that can drop if the column under them is mined away.
+  surfaceLandmarks: {
+    [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
+    [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
+  },
 };
 
 const upgrades = [
@@ -581,8 +591,8 @@ function draw() {
       const material = getCell(wx, wy);
       const px = offsetX + (vx * tileSize);
       const py = offsetY + (vy * tileSize);
-      const isCottageTile = wy === 0 && wx === wrapX(SURFACE_SPOTS.cottageX);
-      const isShopTile = wy === 0 && wx === wrapX(SURFACE_SPOTS.shopX);
+      const isCottageTile = isLandmarkAt(LANDMARK_IDS.COTTAGE, wx, wy);
+      const isShopTile = isLandmarkAt(LANDMARK_IDS.SHOP, wx, wy);
       const transparentSurfaceLane = wy === 0 && material === MATERIALS.EMPTY && !isCottageTile && !isShopTile;
 
       // Keep the y=0 lane transparent so the sky touches the grass with no black separator row.
@@ -711,12 +721,37 @@ function draw() {
   }
 }
 
+function getLandmark(id) {
+  return state.surfaceLandmarks[id];
+}
+
+function isLandmarkAt(id, x, y) {
+  const landmark = getLandmark(id);
+  return landmark && wrapX(landmark.x) === wrapX(x) && landmark.y === y;
+}
+
+/**
+ * Landmark gravity: cottage/shop should sink when no block supports them below.
+ * This mirrors a heavy rock dropping through empty space.
+ */
+function settleSurfaceLandmarks() {
+  for (const id of Object.values(LANDMARK_IDS)) {
+    const landmark = getLandmark(id);
+    if (!landmark) continue;
+    while (landmark.y < WORLD_HEIGHT - 1 && getCell(landmark.x, landmark.y + 1) === MATERIALS.EMPTY) {
+      landmark.y += 1;
+    }
+  }
+}
+
 function isAtCottage() {
-  return state.player.y === 0 && wrapX(state.player.x) === wrapX(SURFACE_SPOTS.cottageX);
+  const cottage = getLandmark(LANDMARK_IDS.COTTAGE);
+  return state.player.y === cottage.y && wrapX(state.player.x) === wrapX(cottage.x);
 }
 
 function isAtShop() {
-  return state.player.y === 0 && wrapX(state.player.x) === wrapX(SURFACE_SPOTS.shopX);
+  const shop = getLandmark(LANDMARK_IDS.SHOP);
+  return state.player.y === shop.y && wrapX(state.player.x) === wrapX(shop.x);
 }
 
 function canSpendStamina() {
@@ -743,7 +778,7 @@ function startRest() {
     return;
   }
   if (!isAtCottage()) {
-    setMessage('Go to the cottage (🛖) at the surface to rest.', 'danger');
+    setMessage('Go to the cottage (🛖) tile to rest.', 'danger');
     playSfx('blocked');
     return;
   }
@@ -971,6 +1006,7 @@ function completeMove(nx, ny, dy, siteDef) {
 
   settleColumn(nx);
   settleColumn(state.player.x);
+  settleSurfaceLandmarks();
   updateHud();
   draw();
 
@@ -1069,6 +1105,8 @@ function useBomb() {
     }
   }
 
+  settleSurfaceLandmarks();
+
   state.bombs -= 1;
   gainXp(20);
   playSfx('bomb');
@@ -1137,6 +1175,10 @@ function startSelectedSite() {
     state.explored = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
     state.player = { x: Math.floor(WORLD_WIDTH / 2), y: 0 };
     state.camera = { x: 0, y: 0 };
+    state.surfaceLandmarks = {
+      [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
+      [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
+    };
     state.maxDepth = 0;
     state.gameOver = false;
     state.bombPackBonus = 0;
