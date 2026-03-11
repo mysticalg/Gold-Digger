@@ -362,17 +362,27 @@ function drawSurface() {
   ctx.fillRect(0, horizon - 10, canvas.width, 10);
 }
 
-/** Particle bursts make digs, treasure, and bombs feel responsive. */
-function spawnParticles(worldX, worldY, color, count = 8, force = 1) {
+/**
+ * Particle bursts make digs, treasure, and bombs feel responsive.
+ * If an origin point is provided, particles are biased to fly away from that origin.
+ */
+function spawnParticles(worldX, worldY, color, count = 8, force = 1, originX = null, originY = null) {
+  const awayX = originX == null ? 0 : worldX - originX;
+  const awayY = originY == null ? -1 : worldY - originY;
+  const awayLength = Math.hypot(awayX, awayY) || 1;
+  const dirX = awayX / awayLength;
+  const dirY = awayY / awayLength;
+
   for (let i = 0; i < count; i += 1) {
+    const sprayStrength = 0.12 + (Math.random() * 0.1);
     state.particles.push({
       x: worldX + 0.5,
       y: worldY + 0.5,
-      vx: (Math.random() - 0.5) * 0.16 * force,
-      vy: (-Math.random() * 0.16) * force,
-      life: 1,
+      vx: (((Math.random() - 0.5) * 0.13) + (dirX * sprayStrength)) * force,
+      vy: (((Math.random() - 0.5) * 0.1) + (dirY * sprayStrength)) * force,
+      life: 1.1,
       color,
-      size: 0.12 + Math.random() * 0.2,
+      size: 0.2 + Math.random() * 0.26,
     });
   }
 }
@@ -387,17 +397,22 @@ function spawnDigDustBurst(action) {
   if (material === MATERIALS.EMPTY) return;
 
   // Push the dust away from the miner so the spray direction matches the shovel swing.
-  const sprayDir = state.playerAnim.facing > 0 ? 1 : -1;
-  const count = 2 + Math.floor(Math.random() * 3);
+  const awayX = action.targetX - state.player.x;
+  const awayY = action.targetY - state.player.y;
+  const length = Math.hypot(awayX, awayY) || 1;
+  const dirX = awayX / length;
+  const dirY = awayY / length;
+  const count = 4 + Math.floor(Math.random() * 4);
   for (let i = 0; i < count; i += 1) {
+    const speed = 0.1 + (Math.random() * 0.16);
     state.particles.push({
       x: action.targetX + 0.5 + ((Math.random() - 0.5) * 0.5),
       y: action.targetY + 0.35 + (Math.random() * 0.35),
-      vx: ((0.02 + Math.random() * 0.08) * sprayDir) + ((Math.random() - 0.5) * 0.03),
-      vy: -(0.03 + Math.random() * 0.1),
-      life: 0.65 + (Math.random() * 0.25),
+      vx: (dirX * speed) + ((Math.random() - 0.5) * 0.05),
+      vy: (dirY * speed) + ((Math.random() - 0.5) * 0.05),
+      life: 0.85 + (Math.random() * 0.35),
       color: getMaterialColor(material),
-      size: 0.09 + Math.random() * 0.1,
+      size: 0.18 + Math.random() * 0.16,
     });
   }
 }
@@ -664,7 +679,7 @@ function digCell(x, y, direction, siteDef) {
   if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
-    spawnParticles(x, y, getMaterialColor(material), 6, 0.8);
+    spawnParticles(x, y, getMaterialColor(material), 10, 1.25, state.player.x, state.player.y);
     playSfx('dig');
     gainXp(7 * siteDef.xpBonus);
   }
