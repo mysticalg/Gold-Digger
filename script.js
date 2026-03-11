@@ -9,6 +9,14 @@ const WORLD_WIDTH = 50;
 const WORLD_HEIGHT = 1000;
 const TILE_SIZE = 16;
 const FOW_SIGHT_RADIUS = 5;
+const MAX_STAMINA = 12;
+const REST_DURATION_MS = 10000;
+
+// Surface buildings placed next to each other at the top lane.
+const SURFACE_SPOTS = {
+  cottageX: Math.floor(WORLD_WIDTH / 2) - 1,
+  shopX: Math.floor(WORLD_WIDTH / 2),
+};
 
 const MATERIALS = {
   EMPTY: 0,
@@ -56,6 +64,9 @@ const state = {
   playerAnim: { bobPhase: 0, facing: 1 },
   // Active timed dig action (3 seconds) with a 5-frame animation.
   digAction: null,
+  stamina: MAX_STAMINA,
+  maxStamina: MAX_STAMINA,
+  restAction: null,
 };
 
 const upgrades = [
@@ -340,7 +351,7 @@ function resizeCanvasToDisplaySize() {
   }
 }
 
-function drawSurface() {
+function drawSurface(tileSize, _viewportCols, offsetX, offsetY) {
   const horizon = Math.max(42, Math.floor(canvas.height * 0.16));
   const sky = ctx.createLinearGradient(0, 0, 0, horizon);
   sky.addColorStop(0, '#78c8ff');
@@ -360,6 +371,31 @@ function drawSurface() {
 
   ctx.fillStyle = '#2f8d40';
   ctx.fillRect(0, horizon - 10, canvas.width, 10);
+
+  // Draw cottage and shop at y=0 so navigation targets are visible.
+  const surfaceY = 0;
+  const cottageScreenX = offsetX + ((wrapX(SURFACE_SPOTS.cottageX - state.camera.x)) * tileSize);
+  const shopScreenX = offsetX + ((wrapX(SURFACE_SPOTS.shopX - state.camera.x)) * tileSize);
+  const buildingY = offsetY + ((surfaceY - state.camera.y) * tileSize);
+  if (buildingY + tileSize > 0 && buildingY < canvas.height) {
+    drawSurfaceBuilding(cottageScreenX, buildingY, tileSize, '#7a4f2b', '🛖');
+    drawSurfaceBuilding(shopScreenX, buildingY, tileSize, '#2f5f96', '🛒');
+  }
+}
+
+function drawSurfaceBuilding(screenX, screenY, tileSize, color, emoji) {
+  const w = Math.max(18, Math.floor(tileSize * 1.8));
+  const h = Math.max(14, Math.floor(tileSize * 1.2));
+  const x = Math.floor(screenX - ((w - tileSize) / 2));
+  const y = Math.floor(screenY - h - 2);
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.fillRect(x, y, w, Math.max(3, Math.floor(h * 0.25)));
+  ctx.font = `${Math.max(11, Math.floor(tileSize * 0.85))}px Trebuchet MS`;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff4d0';
+  ctx.fillText(emoji, x + (w / 2), y + h - Math.max(2, Math.floor(h * 0.2)));
 }
 
 /** Particle bursts make digs, treasure, and bombs feel responsive. */
@@ -431,7 +467,7 @@ function draw() {
   state.camera.x = wrapX(state.player.x - Math.floor(viewportCols / 2));
   state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
 
-  drawSurface();
+  drawSurface(tileSize, viewportCols, offsetX, offsetY);
 
   const boardGlow = ctx.createLinearGradient(offsetX, offsetY, offsetX, offsetY + boardHeightPx);
   boardGlow.addColorStop(0, '#24172e');
@@ -558,6 +594,64 @@ function draw() {
   }
 }
 
+function isAtCottage() {
+  return state.player.y === 0 && wrapX(state.player.x) === wrapX(SURFACE_SPOTS.cottageX);
+}
+
+function isAtShop() {
+  return state.player.y === 0 && wrapX(state.player.x) === wrapX(SURFACE_SPOTS.shopX);
+}
+
+function canSpendStamina() {
+  return state.stamina > 0;
+}
+
+function spendStamina(amount = 1) {
+  state.stamina = Math.max(0, state.stamina - amount);
+}
+
+function clearRestAction() {
+  if (state.restAction?.timer) clearTimeout(state.restAction.timer);
+  state.restAction = null;
+}
+
+/**
+ * Resting is only allowed inside the cottage tile on the surface.
+ * The digger remains responsive (render loop runs) while a 10s timer refills stamina.
+ */
+function startRest() {
+  if (state.gameOver || state.digAction?.active) return;
+  if (state.restAction?.active) {
+    setMessage('Already resting in the cottage...', 'good');
+    return;
+  }
+  if (!isAtCottage()) {
+    setMessage('Go to the cottage (🛖) at the surface to rest.', 'danger');
+    playSfx('blocked');
+    return;
+  }
+  if (state.stamina >= state.maxStamina) {
+    setMessage('Stamina is already full.');
+    return;
+  }
+
+  state.restAction = {
+    active: true,
+    startedAt: performance.now(),
+    durationMs: REST_DURATION_MS,
+    timer: null,
+  };
+  setMessage('Resting in cottage... 10 seconds to full stamina.');
+  updateHud();
+
+  state.restAction.timer = setTimeout(() => {
+    state.stamina = state.maxStamina;
+    clearRestAction();
+    setMessage('Fully rested! Stamina restored.');
+    updateHud();
+  }, REST_DURATION_MS);
+}
+
 function setMessage(msg, tone = 'good') {
   messageBox.textContent = msg;
   messageBox.classList.toggle('is-danger', tone === 'danger');
@@ -591,10 +685,14 @@ function updateHud() {
   $('bomb-count').textContent = state.bombs;
   $('bombs').textContent = state.bombs;
   $('zoom-mode').textContent = state.zoom20x20 ? '20x20' : 'Auto';
+  $('stamina').textContent = state.stamina;
+  $('stamina-max').textContent = state.maxStamina;
+  $('town-status').textContent = isAtCottage() ? 'At Cottage' : isAtShop() ? 'At Shop' : 'Away';
   $('zoom-btn').textContent = state.zoom20x20 ? '🔍 Zoom: 20x20' : '🔍 Zoom: Auto';
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
-  $('status').textContent = state.gameOver ? 'Game Over' : 'Active';
+  $('status').textContent = state.gameOver ? 'Game Over' : state.restAction?.active ? 'Resting' : 'Active';
+  $('rest-btn').disabled = state.gameOver || state.restAction?.active || !isAtCottage() || state.stamina >= state.maxStamina || !!state.digAction?.active;
   renderShop();
 }
 
@@ -667,6 +765,7 @@ function digCell(x, y, direction, siteDef) {
     spawnParticles(x, y, getMaterialColor(material), 6, 0.8);
     playSfx('dig');
     gainXp(7 * siteDef.xpBonus);
+    spendStamina(1);
   }
   return true;
 }
@@ -791,6 +890,10 @@ function endGameFromTrap() {
 
 function movePlayer(dx, dy) {
   if (state.gameOver || state.digAction?.active) return;
+  if (state.restAction?.active) {
+    setMessage('You are resting. Wait for stamina to refill.', 'danger');
+    return;
+  }
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
 
@@ -809,6 +912,13 @@ function movePlayer(dx, dy) {
     return;
   }
 
+  if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+    setMessage('No stamina. Return to the cottage (🛖) and rest for 10s.', 'danger');
+    playSfx('blocked');
+    updateHud();
+    return;
+  }
+
   if (!canDig(targetMaterial, direction)) {
     // Reuse existing error messages and blocked SFX for undiggable materials.
     digCell(nx, ny, direction, siteDef);
@@ -821,7 +931,7 @@ function movePlayer(dx, dy) {
 }
 
 function useBomb() {
-  if (state.gameOver || state.digAction?.active) return;
+  if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
   if (state.bombs <= 0) {
     setMessage('Out of bombs. Buy Bomb Pack in the shop.', 'danger');
     playSfx('blocked');
@@ -867,13 +977,21 @@ function renderShop() {
 
     const btn = document.createElement('button');
     btn.className = 'btn';
+    const atShop = isAtShop();
     btn.title = levelLocked
       ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
-      : `Buy ${upgrade.name}`;
+      : !atShop
+        ? 'Stand on the surface shop tile (🛒) to buy upgrades'
+        : `Buy ${upgrade.name}`;
     btn.textContent = 'Buy Upgrade';
-    btn.disabled = state.money < cost || levelLocked || state.gameOver;
+    btn.disabled = state.money < cost || levelLocked || state.gameOver || !atShop;
     btn.addEventListener('click', () => {
       if (state.money < cost || levelLocked || state.gameOver) return;
+      if (!isAtShop()) {
+        setMessage('Go to the surface shop tile (🛒) to buy upgrades.', 'danger');
+        playSfx('blocked');
+        return;
+      }
       state.money -= cost;
       if (upgrade.id === 'bomb-pack') state.bombs += state.bombPackBonus || 0;
       upgrade.apply();
@@ -905,6 +1023,8 @@ function startSelectedSite() {
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
     state.particles = [];
+    state.stamina = state.maxStamina;
+    clearRestAction();
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
     updateHud();
@@ -932,6 +1052,7 @@ function bindUi() {
     updateHud();
     draw();
   });
+  $('rest-btn').addEventListener('click', startRest);
   $('sfx-btn').addEventListener('click', () => {
     state.sfxEnabled = !state.sfxEnabled;
     updateHud();
@@ -956,6 +1077,7 @@ function bindUi() {
       updateHud();
       draw();
     }
+    if (key === 'r') startRest();
     if (key === 'm') {
       state.sfxEnabled = !state.sfxEnabled;
       updateHud();
