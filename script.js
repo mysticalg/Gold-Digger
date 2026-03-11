@@ -12,6 +12,7 @@ const FOW_SIGHT_RADIUS = 5;
 const MAX_STAMINA = 12;
 const REST_DURATION_MS = 10000;
 const GRASS_REGROW_MS = 30000;
+const STAMINA_WARNING_MS = 1800;
 
 // Surface buildings placed next to each other at the top lane.
 const SURFACE_SPOTS = {
@@ -80,6 +81,8 @@ const state = {
     [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
     [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
   },
+  // Short-lived in-board warning cue shown when the player tries to dig with zero stamina.
+  staminaWarningUntil: 0,
 };
 
 const upgrades = [
@@ -711,6 +714,33 @@ function draw() {
     ctx.stroke();
   }
 
+  // Red warning pulse appears if user tries digging with zero stamina.
+  const staminaWarningActive = performance.now() < state.staminaWarningUntil;
+  if (staminaWarningActive) {
+    const pulse = (Math.sin(performance.now() / 120) + 1) / 2;
+    const warningAlpha = 0.16 + (pulse * 0.2);
+    ctx.fillStyle = `rgba(255, 52, 72, ${warningAlpha.toFixed(3)})`;
+    ctx.fillRect(offsetX, offsetY, boardWidthPx, boardHeightPx);
+
+    ctx.lineWidth = Math.max(4, Math.floor(tileSize * 0.16));
+    ctx.strokeStyle = `rgba(255, 90, 106, ${(0.4 + (pulse * 0.45)).toFixed(3)})`;
+    ctx.strokeRect(offsetX + 2, offsetY + 2, boardWidthPx - 4, boardHeightPx - 4);
+
+    const bannerW = Math.min(boardWidthPx - 30, Math.max(280, Math.floor(boardWidthPx * 0.7)));
+    const bannerH = Math.max(44, Math.floor(tileSize * 2));
+    const bannerX = offsetX + Math.floor((boardWidthPx - bannerW) / 2);
+    const bannerY = offsetY + Math.max(12, Math.floor(tileSize * 0.6));
+    ctx.fillStyle = 'rgba(55, 10, 18, 0.84)';
+    ctx.fillRect(bannerX, bannerY, bannerW, bannerH);
+    ctx.strokeStyle = 'rgba(255, 124, 135, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bannerX, bannerY, bannerW, bannerH);
+    ctx.fillStyle = '#ffd3d8';
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${Math.max(14, Math.floor(tileSize * 0.8))}px Trebuchet MS`;
+    ctx.fillText('⛔ Out of stamina — return to the 🛖 cottage to rest', bannerX + (bannerW / 2), bannerY + Math.floor(bannerH * 0.64));
+  }
+
   if (state.gameOver) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(offsetX, offsetY, boardWidthPx, boardHeightPx);
@@ -760,6 +790,11 @@ function canSpendStamina() {
 
 function spendStamina(amount = 1) {
   state.stamina = Math.max(0, state.stamina - amount);
+}
+
+/** Trigger a temporary visual warning pulse in the play area for zero-stamina digging attempts. */
+function triggerStaminaWarning() {
+  state.staminaWarningUntil = Math.max(state.staminaWarningUntil, performance.now() + STAMINA_WARNING_MS);
 }
 
 function clearRestAction() {
@@ -1068,6 +1103,7 @@ function movePlayer(dx, dy) {
   }
 
   if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+    triggerStaminaWarning();
     setMessage('No stamina. Return to the cottage (🛖) and rest for 10s.', 'danger');
     playSfx('blocked');
     updateHud();
@@ -1189,6 +1225,7 @@ function startSelectedSite() {
     state.digAction = null;
     state.particles = [];
     state.stamina = state.maxStamina;
+    state.staminaWarningUntil = 0;
     clearRestAction();
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
