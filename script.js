@@ -354,8 +354,11 @@ function resizeCanvasToDisplaySize() {
   }
 }
 
-function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx) {
-  // Draw sky/soil inside the board bounds so the terrain and background start at the same point.
+/**
+ * Shared surface horizon math so both the sky painter and underground vignette
+ * agree on where "above-ground" ends in screen space.
+ */
+function getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx) {
   const boardTop = offsetY;
   const boardBottom = offsetY + boardHeightPx;
   const grassRowScreenY = offsetY + ((1 - state.camera.y) * tileSize);
@@ -364,7 +367,14 @@ function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, bo
   const rawHorizon = useSurfaceSkyView
     ? Math.max(grassRowScreenY, surfaceSkyHorizon)
     : grassRowScreenY;
-  const horizon = Math.max(boardTop, Math.min(boardBottom, rawHorizon));
+  return Math.max(boardTop, Math.min(boardBottom, rawHorizon));
+}
+
+function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx) {
+  // Draw sky/soil inside the board bounds so the terrain and background start at the same point.
+  const boardTop = offsetY;
+  const boardBottom = offsetY + boardHeightPx;
+  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx);
 
   const sky = ctx.createLinearGradient(0, boardTop, 0, horizon || (boardTop + 1));
   // Brighter daytime sky palette for a clearer above-ground mood.
@@ -577,11 +587,17 @@ function draw() {
 
   drawSurface(tileSize, viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx);
 
-  const boardGlow = ctx.createLinearGradient(offsetX, offsetY, offsetX, offsetY + boardHeightPx);
-  boardGlow.addColorStop(0, '#24172e');
-  boardGlow.addColorStop(1, '#141622');
-  ctx.fillStyle = boardGlow;
-  ctx.fillRect(offsetX - 2, offsetY - 2, boardWidthPx + 4, boardHeightPx + 4);
+  // Apply underground vignette only below the surface horizon so the blue sky stays visible.
+  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx);
+  const undergroundTop = Math.floor(horizon);
+  const undergroundHeight = Math.max(0, (offsetY + boardHeightPx) - undergroundTop);
+  if (undergroundHeight > 0) {
+    const boardGlow = ctx.createLinearGradient(offsetX, undergroundTop, offsetX, offsetY + boardHeightPx);
+    boardGlow.addColorStop(0, 'rgba(36, 23, 46, 0.2)');
+    boardGlow.addColorStop(1, 'rgba(20, 22, 34, 0.78)');
+    ctx.fillStyle = boardGlow;
+    ctx.fillRect(offsetX - 2, undergroundTop - 1, boardWidthPx + 4, undergroundHeight + 3);
+  }
 
   for (let vy = 0; vy < viewportRows; vy += 1) {
     for (let vx = 0; vx < viewportCols; vx += 1) {
