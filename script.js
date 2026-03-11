@@ -1321,8 +1321,11 @@ function placeSelectedTile(dropOnly = false) {
   if (!state.inventory[material]) { setMessage('No units of that tile left.', 'danger'); return; }
   const target = getPlacementTarget();
   if (!target) return;
-  if (getCell(target.tx, target.ty) !== MATERIALS.EMPTY) {
-    setMessage('Placement target must be empty.', 'danger');
+  const targetMaterial = getCell(target.tx, target.ty);
+  // Struts may replace sand in-place so players can reinforce a collapsing lane quickly.
+  const canReplaceSandWithStrut = material === MATERIALS.STRUT && targetMaterial === MATERIALS.SAND;
+  if (targetMaterial !== MATERIALS.EMPTY && !canReplaceSandWithStrut) {
+    setMessage('Placement target must be empty (struts can replace sand).', 'danger');
     return;
   }
   if (!dropOnly && !state.buildMode) {
@@ -1488,8 +1491,14 @@ function updateHud() {
   renderShop();
 }
 
+/** Struts are structural braces: pass-through for movement but block gravity/digging. */
+function isPassThroughMaterial(material) {
+  return material === MATERIALS.EMPTY || material === MATERIALS.STRUT;
+}
+
 function canDig(material, direction) {
-  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE, MATERIALS.STRUT, MATERIALS.TORCH].includes(material)) return true;
+  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE, MATERIALS.TORCH].includes(material)) return true;
+  if (material === MATERIALS.STRUT) return false;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
   if (material === MATERIALS.GRANITE) return state.canDigRock;
@@ -1501,7 +1510,7 @@ function settleColumn(x) {
   const wx = wrapX(x);
   for (let y = WORLD_HEIGHT - 2; y >= 0; y -= 1) {
     const curr = getCell(wx, y);
-    if (curr === MATERIALS.EMPTY) continue;
+    if (curr === MATERIALS.EMPTY || curr === MATERIALS.STRUT) continue;
     if (getCell(wx, y + 1) === MATERIALS.EMPTY) {
       setCell(wx, y + 1, curr);
       setCell(wx, y, MATERIALS.EMPTY);
@@ -1561,6 +1570,7 @@ function digCell(x, y, direction, siteDef) {
     if (material === MATERIALS.METAL) setMessage('Too hard to dig. Use a bomb!', 'danger');
     if (material === MATERIALS.GRANITE) setMessage('Granite needs Rock Drill or bombs.', 'danger');
     if (material === MATERIALS.LAVA) setMessage('Lava is unpassable. Cool it with water first.', 'danger');
+    if (material === MATERIALS.STRUT) setMessage('Placed struts are permanent supports and cannot be mined.', 'danger');
     playSfx('blocked');
     return false;
   }
@@ -1696,7 +1706,7 @@ function isTrapped() {
     const ny = state.player.y + dir.dy;
     if (!inBounds(nx, ny)) return false;
     const material = getCell(nx, ny);
-    return canDig(material, dir.name) || material === MATERIALS.EMPTY || material === MATERIALS.TREASURE;
+    return canDig(material, dir.name) || isPassThroughMaterial(material) || material === MATERIALS.TREASURE;
   });
 }
 
@@ -1727,14 +1737,14 @@ function movePlayer(dx, dy) {
   const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
   const targetMaterial = getCell(nx, ny);
 
-  // Pure movement into empty space stays instant (no 3-second dig action).
-  if (targetMaterial === MATERIALS.EMPTY) {
+  // Pure movement into pass-through cells stays instant (no 3-second dig action).
+  if (isPassThroughMaterial(targetMaterial)) {
     state.lastMoveAt = now;
     completeMove(nx, ny, dy, siteDef);
     return;
   }
 
-  if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+  if (!isPassThroughMaterial(targetMaterial) && !canSpendStamina()) {
     // Emergency movement rule: with zero stamina, upward movement through loose sand is allowed.
     if (direction === 'up' && targetMaterial === MATERIALS.SAND) {
       setCell(nx, ny, MATERIALS.EMPTY);
@@ -1764,7 +1774,7 @@ function autoCanMoveInto(nx, ny, direction) {
   if (!inBounds(nx, ny)) return false;
   const material = getCell(nx, ny);
   if (material === MATERIALS.LAVA) return false;
-  if (material === MATERIALS.EMPTY) return true;
+  if (isPassThroughMaterial(material)) return true;
   return canDig(material, direction);
 }
 
@@ -1859,7 +1869,9 @@ function useBomb() {
   for (let y = originY - 1; y <= originY + 1; y += 1) {
     for (let x = originX - 1; x <= originX + 1; x += 1) {
       if (!inBounds(x, y)) continue;
-      if (getCell(x, y) === MATERIALS.LAVA) state.lavaSources.delete(lavaKey(x, y));
+      const cell = getCell(x, y);
+      if (cell === MATERIALS.STRUT) continue;
+      if (cell === MATERIALS.LAVA) state.lavaSources.delete(lavaKey(x, y));
       setCell(x, y, MATERIALS.EMPTY);
       spawnParticles(x, y, '#ff9466', 8, 1.6);
       settleColumn(x);
