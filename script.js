@@ -1,10 +1,10 @@
 /**
- * Gold Digger (large-world edition)
- * - 1000x1000 blocks
+ * Gold Digger (looping-world edition)
+ * - 200x1000 blocks, horizontal wrap-around
  * - Camera-follow rendering (only visible tiles are drawn for speed)
  * - Arcade digging, gravity, upgrades, bombs, and site difficulty
  */
-const WORLD_WIDTH = 1000;
+const WORLD_WIDTH = 200;
 const WORLD_HEIGHT = 1000;
 const TILE_SIZE = 16;
 const FOW_SIGHT_RADIUS = 5;
@@ -17,6 +17,8 @@ const MATERIALS = {
   GRANITE: 4,
   TREASURE: 5,
   GRASS: 6,
+  RELIC: 7,
+  CRYSTAL: 8,
 };
 
 const SITE_DEFS = [
@@ -37,6 +39,8 @@ const state = {
   digSpeed: 1,
   digRadius: 1,
   bombs: 0,
+  bombPackBonus: 0,
+  lootMultiplier: 1,
   canDigRock: false,
   canDigPillars: false,
   cooldownMs: 160,
@@ -58,6 +62,7 @@ const upgrades = [
     id: 'speed',
     name: 'Turbo Spade',
     baseCost: 120,
+    requiredLevel: 1,
     desc: 'Dig faster by reducing movement cooldown.',
     apply: () => {
       state.digSpeed += 0.2;
@@ -68,6 +73,7 @@ const upgrades = [
     id: 'radius',
     name: 'Wide Scoop',
     baseCost: 160,
+    requiredLevel: 2,
     desc: 'Side digs also clear one tile below for larger tunnels.',
     apply: () => { state.digRadius = Math.min(2, state.digRadius + 1); },
   },
@@ -75,6 +81,7 @@ const upgrades = [
     id: 'rock',
     name: 'Rock Drill',
     baseCost: 220,
+    requiredLevel: 3,
     desc: 'Allows mining standard rock.',
     apply: () => { state.canDigRock = true; },
   },
@@ -82,6 +89,7 @@ const upgrades = [
     id: 'pillars',
     name: 'Support Cutter',
     baseCost: 260,
+    requiredLevel: 4,
     desc: 'Allows side-cutting through packed rocky supports.',
     apply: () => { state.canDigPillars = true; },
   },
@@ -89,8 +97,28 @@ const upgrades = [
     id: 'bomb-pack',
     name: 'Bomb Pack',
     baseCost: 190,
+    requiredLevel: 2,
     desc: 'Adds 4 bombs for metal/granite demolition.',
     apply: () => { state.bombs += 4; },
+  },
+  {
+    id: 'fuse',
+    name: 'Precision Fuse',
+    baseCost: 330,
+    requiredLevel: 5,
+    desc: 'Bomb packs now include +2 extra bombs each purchase.',
+    apply: () => {
+      state.bombs += 2;
+      state.bombPackBonus = (state.bombPackBonus || 0) + 2;
+    },
+  },
+  {
+    id: 'treasure-lens',
+    name: 'Treasure Lens',
+    baseCost: 280,
+    requiredLevel: 4,
+    desc: 'Increases collectible payout by 20%.',
+    apply: () => { state.lootMultiplier = (state.lootMultiplier || 1) + 0.2; },
   },
 ];
 
@@ -102,20 +130,31 @@ const messageBox = $('message');
 let audioCtx;
 
 function indexOf(x, y) {
-  return (y * WORLD_WIDTH) + x;
+  return (y * WORLD_WIDTH) + wrapX(x);
 }
 
 function inBounds(x, y) {
-  return x >= 0 && y >= 0 && x < WORLD_WIDTH && y < WORLD_HEIGHT;
+  return y >= 0 && y < WORLD_HEIGHT;
+}
+
+/** Wrap x-coordinates so the map loops seamlessly from edge to edge. */
+function wrapX(x) {
+  return ((x % WORLD_WIDTH) + WORLD_WIDTH) % WORLD_WIDTH;
+}
+
+/** Shortest horizontal distance on a looping map (used by fog and vision). */
+function wrappedDistanceX(a, b) {
+  const direct = Math.abs(a - b);
+  return Math.min(direct, WORLD_WIDTH - direct);
 }
 
 function getCell(x, y) {
   if (!inBounds(x, y)) return MATERIALS.GRANITE;
-  return state.world[indexOf(x, y)];
+  return state.world[indexOf(wrapX(x), y)];
 }
 
 function setCell(x, y, value) {
-  if (inBounds(x, y)) state.world[indexOf(x, y)] = value;
+  if (inBounds(x, y)) state.world[indexOf(wrapX(x), y)] = value;
 }
 
 /**
@@ -168,11 +207,13 @@ function playSfx(name) {
 
 /** Mark cells around the player as explored for fog-of-war tracking. */
 function markVisibleArea(cx, cy, radius = FOW_SIGHT_RADIUS) {
-  for (let y = cy - radius; y <= cy + radius; y += 1) {
-    for (let x = cx - radius; x <= cx + radius; x += 1) {
-      if (!inBounds(x, y)) continue;
-      const dist = Math.hypot(x - cx, y - cy);
-      if (dist <= radius) state.explored[indexOf(x, y)] = 1;
+  for (let dy = -radius; dy <= radius; dy += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const wx = wrapX(cx + dx);
+      const wy = cy + dy;
+      if (!inBounds(wx, wy)) continue;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= radius) state.explored[indexOf(wx, wy)] = 1;
     }
   }
 }
@@ -184,7 +225,8 @@ function markVisibleArea(cx, cy, radius = FOW_SIGHT_RADIUS) {
  * - Nearby cells are fully visible for clear navigation.
  */
 function getFogAlpha(wx, wy) {
-  const dist = Math.hypot(wx - state.player.x, wy - state.player.y);
+  const dx = wrappedDistanceX(wx, state.player.x);
+  const dist = Math.hypot(dx, wy - state.player.y);
   const explored = state.explored[indexOf(wx, wy)] === 1;
 
   if (dist <= 1) return 0;
@@ -228,8 +270,18 @@ function buildWorld(siteDef) {
       const deepNoise = coordNoise(x + 99991, y + 31337, seed + 17);
 
       const treasureChance = Math.max(0.004, siteDef.treasureBias - (undergroundDepth * 0.006));
+      const relicChance = 0.003 + undergroundDepth * 0.0035;
+      const crystalChance = 0.002 + Math.max(0, undergroundDepth - 0.35) * 0.005;
       if (n < treasureChance) {
         world[idx] = MATERIALS.TREASURE;
+        continue;
+      }
+      if (n < treasureChance + relicChance) {
+        world[idx] = MATERIALS.RELIC;
+        continue;
+      }
+      if (n < treasureChance + relicChance + crystalChance) {
+        world[idx] = MATERIALS.CRYSTAL;
         continue;
       }
 
@@ -269,6 +321,8 @@ function getMaterialColor(type) {
     case MATERIALS.GRANITE: return '#525565';
     case MATERIALS.TREASURE: return '#f3c741';
     case MATERIALS.GRASS: return '#4aa34a';
+    case MATERIALS.RELIC: return '#b57f5f';
+    case MATERIALS.CRYSTAL: return '#68def2';
     default: return '#0f1320';
   }
 }
@@ -348,7 +402,7 @@ function draw() {
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
   // Camera centers on the player and only stops centering when we hit map boundaries.
-  state.camera.x = Math.max(0, Math.min(WORLD_WIDTH - viewportCols, state.player.x - Math.floor(viewportCols / 2)));
+  state.camera.x = wrapX(state.player.x - Math.floor(viewportCols / 2));
   state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
 
   drawSurface();
@@ -361,7 +415,7 @@ function draw() {
 
   for (let vy = 0; vy < viewportRows; vy += 1) {
     for (let vx = 0; vx < viewportCols; vx += 1) {
-      const wx = state.camera.x + vx;
+      const wx = wrapX(state.camera.x + vx);
       const wy = state.camera.y + vy;
       if (!inBounds(wx, wy)) continue;
 
@@ -469,13 +523,16 @@ function xpToNextLevel() {
 
 function gainXp(amount) {
   state.xp += amount;
+  let didLevelUp = false;
   while (state.xp >= xpToNextLevel()) {
     state.xp -= xpToNextLevel();
     state.level += 1;
     state.money += 45;
+    didLevelUp = true;
     playSfx('levelup');
     setMessage(`Level up! You are now level ${state.level}. +$45 sponsor bonus.`);
   }
+  if (didLevelUp) renderShop();
 }
 
 function updateHud() {
@@ -492,33 +549,57 @@ function updateHud() {
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
   $('status').textContent = state.gameOver ? 'Game Over' : 'Active';
+  renderShop();
 }
 
 function canDig(material, direction) {
-  if (material === MATERIALS.EMPTY || material === MATERIALS.SAND || material === MATERIALS.TREASURE || material === MATERIALS.GRASS) return true;
+  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) return true;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
   return false;
 }
 
 function settleColumn(x) {
+  const wx = wrapX(x);
   for (let y = WORLD_HEIGHT - 2; y >= 0; y -= 1) {
-    const curr = getCell(x, y);
+    const curr = getCell(wx, y);
     if (curr === MATERIALS.EMPTY) continue;
-    if (getCell(x, y + 1) === MATERIALS.EMPTY) {
-      setCell(x, y + 1, curr);
-      setCell(x, y, MATERIALS.EMPTY);
+    if (getCell(wx, y + 1) === MATERIALS.EMPTY) {
+      setCell(wx, y + 1, curr);
+      setCell(wx, y, MATERIALS.EMPTY);
     }
   }
 }
 
 function collectTreasure(siteDef, x, y) {
-  const payout = 45 + Math.floor(Math.random() * 50);
+  const payout = Math.floor((45 + Math.random() * 50) * (state.lootMultiplier || 1));
   state.money += payout;
   gainXp(26 * siteDef.xpBonus);
   spawnParticles(x, y, '#ffdf55', 14, 1.2);
   playSfx('treasure');
   setMessage(`Treasure found! +$${payout}`);
+}
+
+/** Additional collectible node: relic cache with larger money and XP burst. */
+function collectRelic(siteDef, x, y) {
+  const payout = Math.floor((85 + Math.random() * 65) * (state.lootMultiplier || 1));
+  state.money += payout;
+  gainXp(34 * siteDef.xpBonus);
+  spawnParticles(x, y, '#d39b69', 16, 1.3);
+  playSfx('treasure');
+  setMessage(`Ancient relic sold! +$${payout}`);
+}
+
+/** Additional collectible node: crystal seam that can also grant a bonus bomb. */
+function collectCrystal(siteDef, x, y) {
+  const payout = Math.floor((62 + Math.random() * 42) * (state.lootMultiplier || 1));
+  state.money += payout;
+  gainXp(30 * siteDef.xpBonus);
+  const bonusBomb = Math.random() < 0.25;
+  if (bonusBomb) state.bombs += 1;
+  spawnParticles(x, y, '#7be8ff', 14, 1.1);
+  playSfx('treasure');
+  setMessage(`Crystal cache recovered! +$${payout}${bonusBomb ? ' +1 bonus bomb!' : ''}`);
 }
 
 function digCell(x, y, direction, siteDef) {
@@ -533,6 +614,8 @@ function digCell(x, y, direction, siteDef) {
   }
 
   if (material === MATERIALS.TREASURE) collectTreasure(siteDef, x, y);
+  if (material === MATERIALS.RELIC) collectRelic(siteDef, x, y);
+  if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
     spawnParticles(x, y, getMaterialColor(material), 6, 0.8);
@@ -636,7 +719,7 @@ function isTrapped() {
   ];
 
   return !directions.some((dir) => {
-    const nx = state.player.x + dir.dx;
+    const nx = wrapX(state.player.x + dir.dx);
     const ny = state.player.y + dir.dy;
     if (!inBounds(nx, ny)) return false;
     const material = getCell(nx, ny);
@@ -657,9 +740,9 @@ function movePlayer(dx, dy) {
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
 
-  const nx = state.player.x + dx;
+  const nx = wrapX(state.player.x + dx);
   const ny = state.player.y + dy;
-  if (!inBounds(nx, ny)) return;
+  if (!inBounds(0, ny)) return;
 
   const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
   const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
@@ -717,28 +800,31 @@ function renderShop() {
 
   upgrades.forEach((upgrade) => {
     const cost = Math.floor(upgrade.baseCost * (1 + ((state.level - 1) * 0.1)));
+    const levelLocked = state.level < upgrade.requiredLevel;
 
     const box = document.createElement('div');
     box.className = 'shop-item';
 
     const name = document.createElement('strong');
-    name.textContent = `${upgrade.name} — $${cost}`;
+    name.textContent = `${upgrade.name} — $${cost} (Lvl ${upgrade.requiredLevel}+)`;
 
     const desc = document.createElement('p');
     desc.textContent = upgrade.desc;
 
     const btn = document.createElement('button');
     btn.className = 'btn';
-    btn.title = `Buy ${upgrade.name}`;
+    btn.title = levelLocked
+      ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
+      : `Buy ${upgrade.name}`;
     btn.textContent = 'Buy Upgrade';
-    btn.disabled = state.money < cost || state.gameOver;
+    btn.disabled = state.money < cost || levelLocked || state.gameOver;
     btn.addEventListener('click', () => {
-      if (state.money < cost || state.gameOver) return;
+      if (state.money < cost || levelLocked || state.gameOver) return;
       state.money -= cost;
+      if (upgrade.id === 'bomb-pack') state.bombs += state.bombPackBonus || 0;
       upgrade.apply();
       setMessage(`${upgrade.name} purchased.`);
       updateHud();
-      renderShop();
       draw();
     });
 
@@ -749,7 +835,7 @@ function renderShop() {
 
 function startSelectedSite() {
   const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
-  setMessage('Generating 1000x1000 world...');
+  setMessage('Generating 200x1000 looping world...');
 
   setTimeout(() => {
     state.world = buildWorld(siteDef);
@@ -758,6 +844,8 @@ function startSelectedSite() {
     state.camera = { x: 0, y: 0 };
     state.maxDepth = 0;
     state.gameOver = false;
+    state.bombPackBonus = 0;
+    state.lootMultiplier = 1;
     if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
@@ -765,7 +853,6 @@ function startSelectedSite() {
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
     updateHud();
-    renderShop();
     draw();
   }, 0);
 }
