@@ -206,3 +206,6 @@ kbd {
   background: linear-gradient(90deg, #45d87d 0%, #9df5b7 100%);
   transition: width 120ms linear;
 }
+
+
+.is-hidden { display: none !important; }

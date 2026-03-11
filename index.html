@@ -14,7 +14,7 @@
     </header>
 
     <section class="controls-panel" aria-label="Game controls and level selection">
-      <div class="site-select-group">
+      <div id="site-select-wrap" class="site-select-group">
         <label for="site-select">🌍 Archaeological Site</label>
         <select id="site-select" title="Choose where to dig for artifacts and treasure"></select>
       </div>
@@ -53,6 +53,7 @@
       <aside class="shop" aria-label="Upgrade shop">
         <h2>🛒 Miner Shop</h2>
         <p class="shop-hint">Find treasure, upgrade tools, survive deeper layers.</p>
+        <button id="auto-dig-btn" class="btn" title="Toggle automatic safe treasure hunting and auto-return to cottage">🤖 Auto Dig: Off</button>
         <div id="shop-items"></div>
       </aside>
     </section>

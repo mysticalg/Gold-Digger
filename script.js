@@ -65,6 +65,8 @@ const state = {
   cooldownMs: 160,
   lastMoveAt: 0,
   selectedSiteId: SITE_DEFS[0].id,
+  gameStarted: false,
+  autoDigEnabled: false,
   maxDepth: 0,
   // Start zoomed-in by default so the play area is easier to read on high-DPI displays.
   zoom20x20: true,
@@ -214,6 +216,13 @@ function wrapX(x) {
 function wrappedDistanceX(a, b) {
   const direct = Math.abs(a - b);
   return Math.min(direct, WORLD_WIDTH - direct);
+}
+
+/** Return -1/1 horizontal direction using shortest wrap-around distance. */
+function wrappedStepDirection(fromX, toX) {
+  const rightDist = (toX - fromX + WORLD_WIDTH) % WORLD_WIDTH;
+  const leftDist = (fromX - toX + WORLD_WIDTH) % WORLD_WIDTH;
+  return rightDist <= leftDist ? 1 : -1;
 }
 
 function getCell(x, y) {
@@ -608,6 +617,7 @@ function isAtWell() {
 }
 
 function useWater() {
+  if (!state.gameStarted) return;
   if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
   if (!state.waterUnlocked) {
     setMessage('Unlock the well in the shop before using water.', 'danger');
@@ -779,6 +789,7 @@ function draw() {
   updateGrassSpread(now);
   updateLavaFlow(now);
   updateNpcDigger(now);
+  updateAutoDig(now);
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1168,6 +1179,7 @@ function updateHud() {
   $('town-status').textContent = townStatus;
   $('npc-status').textContent = !state.npc.owned ? 'None' : state.npc.alive ? 'Digging' : 'Dead';
   $('zoom-btn').textContent = state.zoom20x20 ? '🔍 Zoom: 20x20' : '🔍 Zoom: Auto';
+  $('auto-dig-btn').textContent = state.autoDigEnabled ? '🤖 Auto Dig: On' : '🤖 Auto Dig: Off';
   $('water-btn').disabled = state.gameOver || (!state.waterUnlocked && !isAtShop()) || state.restAction?.active;
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
@@ -1391,6 +1403,10 @@ function endGameFromTrap() {
 }
 
 function movePlayer(dx, dy) {
+  if (!state.gameStarted) {
+    setMessage('Press Start Dig to begin this expedition.', 'danger');
+    return;
+  }
   if (state.gameOver || state.digAction?.active) return;
   if (state.restAction?.active) clearRestAction();
   const now = performance.now();
@@ -1430,7 +1446,91 @@ function movePlayer(dx, dy) {
   beginTimedDig(nx, ny, direction, siteDef);
 }
 
+function autoCanMoveInto(nx, ny, direction) {
+  if (!inBounds(nx, ny)) return false;
+  const material = getCell(nx, ny);
+  if (material === MATERIALS.LAVA) return false;
+  if (material === MATERIALS.EMPTY) return true;
+  return canDig(material, direction);
+}
+
+/** Keep auto-dig conservative: do not move into cells that leave no nearby exits. */
+function autoHasEscapeAt(nx, ny) {
+  const dirs = [
+    { dx: 0, dy: -1, direction: 'up' },
+    { dx: 0, dy: 1, direction: 'down' },
+    { dx: -1, dy: 0, direction: 'side' },
+    { dx: 1, dy: 0, direction: 'side' },
+  ];
+  return dirs.some((d) => {
+    const tx = wrapX(nx + d.dx);
+    const ty = ny + d.dy;
+    return autoCanMoveInto(tx, ty, d.direction);
+  });
+}
+
+function tryAutoMove(dx, dy) {
+  const nx = wrapX(state.player.x + dx);
+  const ny = state.player.y + dy;
+  if (!inBounds(0, ny)) return false;
+  const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
+  if (!autoCanMoveInto(nx, ny, direction)) return false;
+  if (!autoHasEscapeAt(nx, ny)) return false;
+  movePlayer(dx, dy);
+  return true;
+}
+
+function updateAutoDig(now = performance.now()) {
+  if (!state.autoDigEnabled || !state.gameStarted) return;
+  if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
+  if (now - state.lastMoveAt < state.cooldownMs) return;
+
+  const cottage = getLandmark(LANDMARK_IDS.COTTAGE);
+
+  // Safety-first: route home when stamina is low, then auto-rest.
+  if (state.stamina <= 3) {
+    if (isAtCottage()) {
+      startRest();
+      return;
+    }
+    if (state.player.y > cottage.y) {
+      if (tryAutoMove(0, -1)) return;
+    }
+    const step = wrappedStepDirection(state.player.x, cottage.x);
+    if (tryAutoMove(step, 0)) return;
+    if (tryAutoMove(-step, 0)) return;
+    if (tryAutoMove(0, -1)) return;
+    return;
+  }
+
+  // Priority 1: immediately adjacent valuables.
+  const valuableDirs = [
+    { dx: 0, dy: 1, direction: 'down' },
+    { dx: -1, dy: 0, direction: 'side' },
+    { dx: 1, dy: 0, direction: 'side' },
+    { dx: 0, dy: -1, direction: 'up' },
+  ];
+  for (const d of valuableDirs) {
+    const nx = wrapX(state.player.x + d.dx);
+    const ny = state.player.y + d.dy;
+    if (!inBounds(nx, ny)) continue;
+    const material = getCell(nx, ny);
+    if (![MATERIALS.TREASURE, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) continue;
+    if (tryAutoMove(d.dx, d.dy)) return;
+  }
+
+  // Priority 2: progress deeper safely.
+  if (tryAutoMove(0, 1)) return;
+
+  // Priority 3: carve sideways, then up as last resort.
+  const sideStep = Math.random() < 0.5 ? -1 : 1;
+  if (tryAutoMove(sideStep, 0)) return;
+  if (tryAutoMove(-sideStep, 0)) return;
+  tryAutoMove(0, -1);
+}
+
 function useBomb() {
+  if (!state.gameStarted) return;
   if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
   if (state.bombs <= 0) {
     setMessage('Out of bombs. Buy Bomb Pack in the shop.', 'danger');
@@ -1478,44 +1578,50 @@ function renderShop() {
     const desc = document.createElement('p');
     desc.textContent = upgrade.desc;
 
-    const btn = document.createElement('button');
-    btn.className = 'btn';
     const atShop = isAtShop();
     const alreadyOwned = upgrade.oneTime && upgrade.isOwned?.();
     const customBlocked = upgrade.canBuy && !upgrade.canBuy();
-    btn.title = levelLocked
-      ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
-      : alreadyOwned
-        ? `${upgrade.name} already unlocked`
-        : customBlocked
-          ? `Cannot buy ${upgrade.name} right now`
-          : !atShop
-            ? 'Stand on the surface shop tile (🛒) to buy upgrades'
-            : `Buy ${upgrade.name}`;
-    btn.textContent = alreadyOwned ? 'Owned' : 'Buy Upgrade';
-    btn.disabled = state.money < cost || levelLocked || state.gameOver || !atShop || alreadyOwned || customBlocked;
-    btn.addEventListener('click', () => {
-      if (state.money < cost || levelLocked || state.gameOver || alreadyOwned || customBlocked) return;
-      if (!isAtShop()) {
-        setMessage('Go to the surface shop tile (🛒) to buy upgrades.', 'danger');
-        playSfx('blocked');
-        return;
-      }
-      state.money -= cost;
-      if (upgrade.id === 'bomb-pack') state.bombs += state.bombPackBonus || 0;
-      upgrade.apply();
-      setMessage(`${upgrade.name} purchased.`);
-      updateHud();
-      draw();
-    });
 
-    box.append(name, desc, btn);
+    if (atShop) {
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.title = levelLocked
+        ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
+        : alreadyOwned
+          ? `${upgrade.name} already unlocked`
+          : customBlocked
+            ? `Cannot buy ${upgrade.name} right now`
+            : `Buy ${upgrade.name}`;
+      btn.textContent = alreadyOwned ? 'Owned' : 'Buy Upgrade';
+      btn.disabled = state.money < cost || levelLocked || state.gameOver || alreadyOwned || customBlocked;
+      btn.addEventListener('click', () => {
+        if (state.money < cost || levelLocked || state.gameOver || alreadyOwned || customBlocked) return;
+        if (!isAtShop()) {
+          setMessage('Go to the surface shop tile (🛒) to buy upgrades.', 'danger');
+          playSfx('blocked');
+          return;
+        }
+        state.money -= cost;
+        if (upgrade.id === 'bomb-pack') state.bombs += state.bombPackBonus || 0;
+        upgrade.apply();
+        setMessage(`${upgrade.name} purchased.`);
+        updateHud();
+        draw();
+      });
+      box.append(name, desc, btn);
+    } else {
+      const note = document.createElement('p');
+      note.textContent = 'Enter the shop tile (🛒) to reveal purchase buttons.';
+      box.append(name, desc, note);
+    }
     container.appendChild(box);
   });
 }
 
 function startSelectedSite() {
   const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
+  state.gameStarted = true;
+  $('site-select-wrap').classList.add('is-hidden');
   setMessage('Generating 200x1000 looping world...');
 
   setTimeout(() => {
@@ -1536,6 +1642,7 @@ function startSelectedSite() {
     state.water = 0;
     state.lastLavaFlowAt = 0;
     state.npc = { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 };
+    state.autoDigEnabled = false;
     if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
     if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
@@ -1566,7 +1673,7 @@ function bindUi() {
 
   siteSelect.addEventListener('change', (event) => {
     state.selectedSiteId = event.target.value;
-    startSelectedSite();
+    setMessage(`Site selected: ${SITE_DEFS.find((site) => site.id === state.selectedSiteId).name}. Press Start Dig.`);
   });
 
   $('start-btn').addEventListener('click', startSelectedSite);
@@ -1578,6 +1685,15 @@ function bindUi() {
   });
   $('rest-btn').addEventListener('click', () => startRest(true));
   $('water-btn').addEventListener('click', useWater);
+  $('auto-dig-btn').addEventListener('click', () => {
+    if (!state.gameStarted) {
+      setMessage('Press Start Dig before enabling auto-dig.', 'danger');
+      return;
+    }
+    state.autoDigEnabled = !state.autoDigEnabled;
+    setMessage(state.autoDigEnabled ? 'Auto-dig enabled.' : 'Auto-dig disabled.');
+    updateHud();
+  });
   $('sfx-btn').addEventListener('click', () => {
     state.sfxEnabled = !state.sfxEnabled;
     updateHud();
@@ -1621,4 +1737,6 @@ function bindUi() {
 }
 
 bindUi();
-startSelectedSite();
+setMessage('Choose a site, then press Start Dig to begin.');
+updateHud();
+draw();
