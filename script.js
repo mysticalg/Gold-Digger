@@ -1565,6 +1565,13 @@ function renderShop() {
   const container = $('shop-items');
   container.innerHTML = '';
 
+  if (!isAtShop()) {
+    const hint = document.createElement('p');
+    hint.className = 'shop-hint';
+    hint.textContent = 'Stand on the 🛒 shop tile to reveal all buy buttons.';
+    container.appendChild(hint);
+  }
+
   upgrades.forEach((upgrade) => {
     const cost = Math.floor(upgrade.baseCost * (1 + ((state.level - 1) * 0.1)));
     const levelLocked = state.level < upgrade.requiredLevel;
@@ -1582,6 +1589,9 @@ function renderShop() {
     const alreadyOwned = upgrade.oneTime && upgrade.isOwned?.();
     const customBlocked = upgrade.canBuy && !upgrade.canBuy();
 
+    box.append(name, desc);
+
+    // Hard-hide purchase controls unless the player is physically on the shop tile.
     if (atShop) {
       const btn = document.createElement('button');
       btn.className = 'btn';
@@ -1608,11 +1618,7 @@ function renderShop() {
         updateHud();
         draw();
       });
-      box.append(name, desc, btn);
-    } else {
-      const note = document.createElement('p');
-      note.textContent = 'Enter the shop tile (🛒) to reveal purchase buttons.';
-      box.append(name, desc, note);
+      box.append(btn);
     }
     container.appendChild(box);
   });
