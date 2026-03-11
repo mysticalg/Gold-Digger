@@ -76,6 +76,8 @@ const state = {
   playerAnim: { bobPhase: 0, facing: 1 },
   // Active timed dig action (3 seconds) with a 5-frame animation.
   digAction: null,
+  // Smooth movement tween so each tile-to-tile step scrolls/animates cleanly.
+  moveAnim: null,
   stamina: MAX_STAMINA,
   maxStamina: MAX_STAMINA,
   restAction: null,
@@ -223,6 +225,36 @@ function wrappedStepDirection(fromX, toX) {
   const rightDist = (toX - fromX + WORLD_WIDTH) % WORLD_WIDTH;
   const leftDist = (fromX - toX + WORLD_WIDTH) % WORLD_WIDTH;
   return rightDist <= leftDist ? 1 : -1;
+}
+
+/** Smallest signed horizontal delta on a wrapping world (for smooth interpolation). */
+function shortestWrappedDelta(fromX, toX) {
+  const rightDist = (toX - fromX + WORLD_WIDTH) % WORLD_WIDTH;
+  const leftDist = (fromX - toX + WORLD_WIDTH) % WORLD_WIDTH;
+  return rightDist <= leftDist ? rightDist : -leftDist;
+}
+
+function startMoveAnimation(fromX, fromY, toX, toY, durationMs = 180) {
+  state.moveAnim = {
+    active: true,
+    startedAt: performance.now(),
+    durationMs,
+    fromX: wrapX(fromX),
+    fromY,
+    deltaX: shortestWrappedDelta(fromX, toX),
+    deltaY: toY - fromY,
+  };
+}
+
+function getAnimatedPlayerPosition(now = performance.now()) {
+  const anim = state.moveAnim;
+  if (!anim?.active) return { x: state.player.x, y: state.player.y };
+  const t = Math.min(1, (now - anim.startedAt) / anim.durationMs);
+  const eased = 1 - ((1 - t) ** 2);
+  const x = wrapX(anim.fromX + (anim.deltaX * eased));
+  const y = anim.fromY + (anim.deltaY * eased);
+  if (t >= 1) state.moveAnim = null;
+  return { x, y };
 }
 
 function getCell(x, y) {
@@ -786,6 +818,7 @@ function updateParticles() {
 
 function draw() {
   const now = performance.now();
+  const animatedPlayer = getAnimatedPlayerPosition(now);
   updateGrassSpread(now);
   updateLavaFlow(now);
   updateNpcDigger(now);
@@ -804,8 +837,8 @@ function draw() {
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
   // Camera centers on the player; at the surface we allow negative camera Y so the player stays centered.
-  state.camera.x = wrapX(state.player.x - Math.floor(viewportCols / 2));
-  const targetCameraY = state.player.y - Math.floor(viewportRows / 2);
+  state.camera.x = wrapX(animatedPlayer.x - Math.floor(viewportCols / 2));
+  const targetCameraY = animatedPlayer.y - Math.floor(viewportRows / 2);
   const topSkyRows = Math.max(0, Math.floor(viewportRows / 2) - 1);
   const minCameraY = -topSkyRows;
   state.camera.y = Math.max(minCameraY, Math.min(WORLD_HEIGHT - viewportRows, targetCameraY));
@@ -917,9 +950,9 @@ function draw() {
 
   // Convert world X -> viewport X with wrap awareness so edge-crossing never places
   // the player sprite off-screen when camera.x wrapped to the other side.
-  const playerViewportX = wrapX(state.player.x - state.camera.x);
+  const playerViewportX = wrapX(animatedPlayer.x - state.camera.x);
   const playerScreenX = offsetX + (playerViewportX * tileSize);
-  const playerScreenY = offsetY + ((state.player.y - state.camera.y) * tileSize);
+  const playerScreenY = offsetY + ((animatedPlayer.y - state.camera.y) * tileSize);
   const bob = Math.sin(state.playerAnim.bobPhase) * Math.max(1, tileSize * 0.05);
   const px = playerScreenX;
   const py = playerScreenY + bob;
@@ -1350,11 +1383,15 @@ function dyFromDirection(direction) {
 }
 
 function completeMove(nx, ny, dy, siteDef) {
+  const prevX = state.player.x;
+  const prevY = state.player.y;
   state.playerAnim.bobPhase += 0.85;
-  state.playerAnim.facing = nx < state.player.x ? -1 : nx > state.player.x ? 1 : state.playerAnim.facing;
+  const horizontalDelta = shortestWrappedDelta(state.player.x, nx);
+  state.playerAnim.facing = horizontalDelta < 0 ? -1 : horizontalDelta > 0 ? 1 : state.playerAnim.facing;
   state.player.x = nx;
   state.player.y = ny;
   state.maxDepth = Math.max(state.maxDepth, ny);
+  startMoveAnimation(prevX, prevY, nx, ny);
   markVisibleArea(state.player.x, state.player.y);
 
   if (dy === 0 && state.digRadius > 1) {
@@ -1428,6 +1465,13 @@ function movePlayer(dx, dy) {
   }
 
   if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+    // Emergency movement rule: with zero stamina, upward movement through loose sand is allowed.
+    if (direction === 'up' && targetMaterial === MATERIALS.SAND) {
+      setCell(nx, ny, MATERIALS.EMPTY);
+      state.lastMoveAt = now;
+      completeMove(nx, ny, dy, siteDef);
+      return;
+    }
     triggerStaminaWarning();
     setMessage('No stamina. Return to the cottage (🛖) and rest for 10s.', 'danger');
     playSfx('blocked');
@@ -1653,6 +1697,7 @@ function startSelectedSite() {
     if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
+    state.moveAnim = null;
     state.particles = [];
     state.maxStamina = MAX_STAMINA;
     state.stamina = state.maxStamina;
