@@ -11,11 +11,20 @@ const TILE_SIZE = 16;
 const FOW_SIGHT_RADIUS = 5;
 const MAX_STAMINA = 12;
 const REST_DURATION_MS = 10000;
+const GRASS_SPREAD_INTERVAL_MS = 1000;
+const LAVA_FLOW_INTERVAL_MS = 900;
+const STAMINA_WARNING_MS = 1800;
 
 // Surface buildings placed next to each other at the top lane.
 const SURFACE_SPOTS = {
   cottageX: Math.floor(WORLD_WIDTH / 2) - 1,
   shopX: Math.floor(WORLD_WIDTH / 2),
+};
+
+const LANDMARK_IDS = {
+  COTTAGE: 'cottage',
+  SHOP: 'shop',
+  WELL: 'well',
 };
 
 const MATERIALS = {
@@ -28,6 +37,7 @@ const MATERIALS = {
   GRASS: 6,
   RELIC: 7,
   CRYSTAL: 8,
+  LAVA: 9,
 };
 
 const SITE_DEFS = [
@@ -55,6 +65,8 @@ const state = {
   cooldownMs: 160,
   lastMoveAt: 0,
   selectedSiteId: SITE_DEFS[0].id,
+  gameStarted: false,
+  autoDigEnabled: false,
   maxDepth: 0,
   // Start zoomed-in by default so the play area is easier to read on high-DPI displays.
   zoom20x20: true,
@@ -67,6 +79,22 @@ const state = {
   stamina: MAX_STAMINA,
   maxStamina: MAX_STAMINA,
   restAction: null,
+  // Timestamp throttle for sand-supported grass spreading checks.
+  lastGrassSpreadAt: 0,
+  // Cottage/shop/well are physical landmark tiles that can drop if the column under them is mined away.
+  surfaceLandmarks: {
+    [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
+    [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
+    [LANDMARK_IDS.WELL]: { x: SURFACE_SPOTS.shopX + 1, y: 0 },
+  },
+  lastLavaFlowAt: 0,
+  lavaSources: new Map(),
+  waterUnlocked: false,
+  water: 0,
+  npc: { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 },
+  // Short-lived in-board warning cue shown when the player tries to dig with zero stamina.
+  staminaWarningUntil: 0,
+  lastLowStaminaWarnAt: 0,
 };
 
 const upgrades = [
@@ -94,7 +122,7 @@ const upgrades = [
     name: 'Rock Drill',
     baseCost: 220,
     requiredLevel: 3,
-    desc: 'Allows mining standard rock.',
+    desc: 'Allows mining standard rock and cooled granite.',
     apply: () => { state.canDigRock = true; },
   },
   {
@@ -132,6 +160,36 @@ const upgrades = [
     desc: 'Increases collectible payout by 20%.',
     apply: () => { state.lootMultiplier = (state.lootMultiplier || 1) + 0.2; },
   },
+  {
+    id: 'well-unlock',
+    name: 'Well Unlock',
+    baseCost: 240,
+    requiredLevel: 3,
+    desc: 'Unlocks the well next to the shop so you can collect water.',
+    oneTime: true,
+    isOwned: () => state.waterUnlocked,
+    apply: () => {
+      state.waterUnlocked = true;
+      state.water += 2;
+    },
+  },
+  {
+    id: 'npc-digger',
+    name: 'NPC Digger',
+    baseCost: 360,
+    requiredLevel: 4,
+    desc: 'Hire (or replace) an auto-digger that mines and sells loot for you.',
+    canBuy: () => !state.npc.alive,
+    apply: () => {
+      state.npc.owned = true;
+      state.npc.alive = true;
+      state.npc.x = state.player.x;
+      state.npc.y = Math.max(0, state.player.y);
+      state.npc.stamina = state.npc.maxStamina;
+      state.npc.restUntil = 0;
+      state.npc.nextActionAt = performance.now() + 350;
+    },
+  },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -158,6 +216,13 @@ function wrapX(x) {
 function wrappedDistanceX(a, b) {
   const direct = Math.abs(a - b);
   return Math.min(direct, WORLD_WIDTH - direct);
+}
+
+/** Return -1/1 horizontal direction using shortest wrap-around distance. */
+function wrappedStepDirection(fromX, toX) {
+  const rightDist = (toX - fromX + WORLD_WIDTH) % WORLD_WIDTH;
+  const leftDist = (fromX - toX + WORLD_WIDTH) % WORLD_WIDTH;
+  return rightDist <= leftDist ? 1 : -1;
 }
 
 function getCell(x, y) {
@@ -314,6 +379,13 @@ function buildWorld(siteDef) {
         continue;
       }
 
+      // Deep isolated lava pockets are initially contained by hard rock.
+      const lavaChance = Math.max(0, undergroundDepth - 0.82) * 0.04;
+      if (n > 0.62 && n < (0.62 + lavaChance) && deepNoise < 0.35) {
+        world[idx] = MATERIALS.LAVA;
+        continue;
+      }
+
       const graniteChance = siteDef.graniteBias + ((undergroundDepth - 0.85) / 0.15) * 0.35;
       const metalChance = siteDef.metalBias + 0.18;
       if (deepNoise < graniteChance) world[idx] = MATERIALS.GRANITE;
@@ -335,6 +407,7 @@ function getMaterialColor(type) {
     case MATERIALS.GRASS: return '#4aa34a';
     case MATERIALS.RELIC: return '#b57f5f';
     case MATERIALS.CRYSTAL: return '#68def2';
+    case MATERIALS.LAVA: return '#ff6a2a';
     default: return '#0f1320';
   }
 }
@@ -351,51 +424,295 @@ function resizeCanvasToDisplaySize() {
   }
 }
 
-function drawSurface(tileSize, _viewportCols, offsetX, offsetY) {
-  const horizon = Math.max(42, Math.floor(canvas.height * 0.16));
-  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
-  sky.addColorStop(0, '#78c8ff');
-  sky.addColorStop(1, '#bce9ff');
-  ctx.fillStyle = sky;
-  ctx.fillRect(0, 0, canvas.width, horizon);
+/**
+ * Shared surface horizon math so both the sky painter and underground vignette
+ * agree on where "above-ground" ends in screen space.
+ */
+function getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx) {
+  const boardTop = offsetY;
+  const boardBottom = offsetY + boardHeightPx;
+  // Lock horizon directly to the grass row so there is no dark gap between sky and ground.
+  const grassRowScreenY = offsetY + ((1 - state.camera.y) * tileSize);
+  return Math.max(boardTop, Math.min(boardBottom, grassRowScreenY));
+}
 
+function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx) {
+  // Draw sky/soil inside the board bounds so the terrain and background start at the same point.
+  const boardTop = offsetY;
+  const boardBottom = offsetY + boardHeightPx;
+  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx);
+
+  const sky = ctx.createLinearGradient(0, boardTop, 0, horizon || (boardTop + 1));
+  // Brighter daytime sky palette for a clearer above-ground mood.
+  sky.addColorStop(0, '#58b8ff');
+  sky.addColorStop(0.55, '#87d4ff');
+  sky.addColorStop(1, '#bfe9ff');
+  ctx.fillStyle = sky;
+  ctx.fillRect(offsetX, boardTop, boardWidthPx, Math.max(0, horizon - boardTop));
+
+  // Fill below the horizon with earth tones so terrain always reads below the grass strip.
+  const soil = ctx.createLinearGradient(0, horizon, 0, boardBottom);
+  soil.addColorStop(0, '#2a3627');
+  soil.addColorStop(1, '#171823');
+  ctx.fillStyle = soil;
+  ctx.fillRect(offsetX, horizon, boardWidthPx, Math.max(0, boardBottom - horizon));
+
+  // Keep the sun in the visible sky band (never below the computed horizon line).
   const pulse = 0.08 * Math.sin(performance.now() / 620);
-  ctx.fillStyle = `rgba(255, 225, 91, ${0.35 + pulse})`;
+  const sunY = Math.max(boardTop + 42, Math.min(horizon - 28, boardTop + Math.floor((horizon - boardTop) * 0.35)));
+  const sunX = offsetX + boardWidthPx - 95;
+
+  // Bloom halo uses layered radial gradients for a soft glow without expensive full-screen blur.
+  const bloomRadius = 150 + (pulse * 18);
+  const bloom = ctx.createRadialGradient(sunX, sunY, 12, sunX, sunY, bloomRadius);
+  bloom.addColorStop(0, 'rgba(255, 250, 190, 0.58)');
+  bloom.addColorStop(0.35, 'rgba(255, 226, 120, 0.33)');
+  bloom.addColorStop(0.75, 'rgba(255, 198, 86, 0.14)');
+  bloom.addColorStop(1, 'rgba(255, 180, 66, 0)');
+  ctx.fillStyle = bloom;
+  ctx.fillRect(offsetX, boardTop, boardWidthPx, Math.max(0, horizon - boardTop));
+
+  // Short sun-ray sweep for extra shine while keeping animation subtle.
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = `rgba(255, 226, 132, ${0.22 + (pulse * 0.22)})`;
+  ctx.lineWidth = 2;
+  const rays = 10;
+  const rayInner = 34;
+  const rayOuter = 64 + (pulse * 10);
+  for (let i = 0; i < rays; i += 1) {
+    const angle = ((Math.PI * 2) / rays) * i + (performance.now() / 2800);
+    ctx.beginPath();
+    ctx.moveTo(sunX + (Math.cos(angle) * rayInner), sunY + (Math.sin(angle) * rayInner));
+    ctx.lineTo(sunX + (Math.cos(angle) * rayOuter), sunY + (Math.sin(angle) * rayOuter));
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.fillStyle = `rgba(255, 225, 91, ${0.38 + pulse})`;
   ctx.beginPath();
-  ctx.arc(canvas.width - 95, 70, 48, 0, Math.PI * 2);
+  ctx.arc(sunX, sunY, 48, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = '#ffdf55';
   ctx.beginPath();
-  ctx.arc(canvas.width - 95, 70, 28, 0, Math.PI * 2);
+  ctx.arc(sunX, sunY, 28, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 220, 0.55)';
+  ctx.beginPath();
+  ctx.arc(sunX - 8, sunY - 8, 9, 0, Math.PI * 2);
   ctx.fill();
 
+  // Surface band is locked to the grass row for cleaner separation of sky and underground.
+  const bandHeight = Math.max(4, Math.floor(tileSize * 0.25));
   ctx.fillStyle = '#2f8d40';
-  ctx.fillRect(0, horizon - 10, canvas.width, 10);
+  ctx.fillRect(offsetX, Math.max(boardTop, horizon - bandHeight), boardWidthPx, bandHeight);
 
-  // Draw cottage and shop at y=0 so navigation targets are visible.
-  const surfaceY = 0;
-  const cottageScreenX = offsetX + ((wrapX(SURFACE_SPOTS.cottageX - state.camera.x)) * tileSize);
-  const shopScreenX = offsetX + ((wrapX(SURFACE_SPOTS.shopX - state.camera.x)) * tileSize);
-  const buildingY = offsetY + ((surfaceY - state.camera.y) * tileSize);
-  if (buildingY + tileSize > 0 && buildingY < canvas.height) {
-    drawSurfaceBuilding(cottageScreenX, buildingY, tileSize, '#7a4f2b', '🛖');
-    drawSurfaceBuilding(shopScreenX, buildingY, tileSize, '#2f5f96', '🛒');
+  // Surface landmarks are rendered as in-grid icon tiles so only one cottage/shop is shown.
+}
+
+/** Draw an always-visible icon tile for surface landmarks on the board itself. */
+function drawSurfaceIconTile(px, py, tileSize, tileColor, icon) {
+  ctx.fillStyle = tileColor;
+  ctx.fillRect(px + 1, py + 1, tileSize - 2, tileSize - 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(px + 2, py + 2, tileSize - 4, Math.max(2, Math.floor(tileSize * 0.18)));
+  ctx.font = `${Math.max(11, Math.floor(tileSize * 0.8))}px Trebuchet MS`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fffdf5';
+  ctx.fillText(icon, px + (tileSize / 2), py + (tileSize / 2) + 0.5);
+  ctx.textBaseline = 'alphabetic';
+}
+
+/**
+ * Grass spreading rule:
+ * - an empty tile can grow grass only if there is SAND directly below it
+ * - growth requires at least one neighboring grass tile (8-way, including diagonals)
+ */
+function canGrassSpreadTo(x, y) {
+  if (!inBounds(x, y)) return false;
+  if (getCell(x, y) !== MATERIALS.EMPTY) return false;
+  if (getCell(x, y + 1) !== MATERIALS.SAND) return false;
+
+  for (let dy = -1; dy <= 1; dy += 1) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      if (dx === 0 && dy === 0) continue;
+      if (getCell(x + dx, y + dy) === MATERIALS.GRASS) return true;
+    }
+  }
+  return false;
+}
+
+function updateGrassSpread(now = performance.now()) {
+  if (now - state.lastGrassSpreadAt < GRASS_SPREAD_INTERVAL_MS) return;
+  state.lastGrassSpreadAt = now;
+
+  const newGrass = [];
+  for (let y = 0; y < WORLD_HEIGHT - 1; y += 1) {
+    for (let x = 0; x < WORLD_WIDTH; x += 1) {
+      if (!canGrassSpreadTo(x, y)) continue;
+      if (Math.random() < 0.34) newGrass.push([x, y]);
+    }
+  }
+
+  for (const [x, y] of newGrass) setCell(x, y, MATERIALS.GRASS);
+}
+
+function lavaKey(x, y) {
+  return `${wrapX(x)},${y}`;
+}
+
+function initLavaSourcesFromWorld() {
+  state.lavaSources = new Map();
+  for (let y = 0; y < WORLD_HEIGHT; y += 1) {
+    for (let x = 0; x < WORLD_WIDTH; x += 1) {
+      if (getCell(x, y) !== MATERIALS.LAVA) continue;
+      // Each original lava tile may expand to ~10x its initial size.
+      state.lavaSources.set(lavaKey(x, y), { x: wrapX(x), y, spreadLeft: 9 });
+    }
   }
 }
 
-function drawSurfaceBuilding(screenX, screenY, tileSize, color, emoji) {
-  const w = Math.max(18, Math.floor(tileSize * 1.8));
-  const h = Math.max(14, Math.floor(tileSize * 1.2));
-  const x = Math.floor(screenX - ((w - tileSize) / 2));
-  const y = Math.floor(screenY - h - 2);
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = 'rgba(0,0,0,0.28)';
-  ctx.fillRect(x, y, w, Math.max(3, Math.floor(h * 0.25)));
-  ctx.font = `${Math.max(11, Math.floor(tileSize * 0.85))}px Trebuchet MS`;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#fff4d0';
-  ctx.fillText(emoji, x + (w / 2), y + h - Math.max(2, Math.floor(h * 0.2)));
+function killNpc(reason) {
+  if (!state.npc.alive) return;
+  state.npc.alive = false;
+  setMessage(`NPC digger died: ${reason}. Buy another at the shop.`, 'danger');
+}
+
+function updateLavaFlow(now = performance.now()) {
+  if (now - state.lastLavaFlowAt < LAVA_FLOW_INTERVAL_MS) return;
+  state.lastLavaFlowAt = now;
+
+  const newLava = [];
+  for (const source of state.lavaSources.values()) {
+    if (source.spreadLeft <= 0) continue;
+    const candidates = [];
+    const dirs = [[0, 1], [1, 0], [-1, 0], [0, -1]];
+    for (const [dx, dy] of dirs) {
+      const nx = wrapX(source.x + dx);
+      const ny = source.y + dy;
+      if (!inBounds(nx, ny)) continue;
+      if (getCell(nx, ny) === MATERIALS.EMPTY) candidates.push([nx, ny]);
+    }
+    if (!candidates.length) continue;
+    const [nx, ny] = candidates[Math.floor(Math.random() * candidates.length)];
+    newLava.push([nx, ny]);
+    source.spreadLeft -= 1;
+  }
+
+  for (const [nx, ny] of newLava) {
+    setCell(nx, ny, MATERIALS.LAVA);
+    state.lavaSources.set(lavaKey(nx, ny), { x: nx, y: ny, spreadLeft: 0 });
+    if (state.npc.alive && state.npc.x === nx && state.npc.y === ny) killNpc('walked into a lava leak');
+    if (state.player.x === nx && state.player.y === ny) {
+      state.gameOver = true;
+      setMessage('Lava engulfed your tile. Game over!', 'danger');
+    }
+  }
+}
+
+function isAtWell() {
+  const well = getLandmark(LANDMARK_IDS.WELL);
+  return state.waterUnlocked && state.player.y === well.y && wrapX(state.player.x) === wrapX(well.x);
+}
+
+function useWater() {
+  if (!state.gameStarted) return;
+  if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
+  if (!state.waterUnlocked) {
+    setMessage('Unlock the well in the shop before using water.', 'danger');
+    return;
+  }
+
+  if (isAtWell()) {
+    state.water = Math.min(12, state.water + 3);
+    setMessage('Collected water from the well (+3).');
+    updateHud();
+    return;
+  }
+
+  if (state.water <= 0) {
+    setMessage('No water left. Refill at the well (🪣).', 'danger');
+    return;
+  }
+
+  let cooled = 0;
+  for (let y = state.player.y - 1; y <= state.player.y + 1; y += 1) {
+    for (let x = state.player.x - 1; x <= state.player.x + 1; x += 1) {
+      if (!inBounds(x, y)) continue;
+      if (getCell(x, y) !== MATERIALS.LAVA) continue;
+      setCell(x, y, MATERIALS.GRANITE);
+      state.lavaSources.delete(lavaKey(x, y));
+      cooled += 1;
+    }
+  }
+
+  if (cooled <= 0) {
+    setMessage('Splash missed. Stand next to lava to cool it.', 'danger');
+    return;
+  }
+
+  state.water -= 1;
+  setMessage(`Water cooled ${cooled} lava tile${cooled === 1 ? '' : 's'} into granite.`);
+  updateHud();
+}
+
+function isNpcTrapped() {
+  const dirs = [[0,1],[1,0],[-1,0],[0,-1]];
+  return !dirs.some(([dx,dy]) => {
+    const nx = wrapX(state.npc.x + dx);
+    const ny = state.npc.y + dy;
+    if (!inBounds(nx, ny)) return false;
+    const m = getCell(nx, ny);
+    return m === MATERIALS.EMPTY || canDig(m, dy !== 0 ? (dy > 0 ? 'down':'up') : 'side');
+  });
+}
+
+function updateNpcDigger(now = performance.now()) {
+  if (!state.npc.alive) return;
+  if (state.npc.restUntil > now) return;
+  if (state.npc.restUntil && now >= state.npc.restUntil) {
+    state.npc.restUntil = 0;
+    state.npc.stamina = state.npc.maxStamina;
+  }
+  if (state.npc.stamina <= 0) {
+    state.npc.restUntil = now + REST_DURATION_MS;
+    return;
+  }
+  if (now < state.npc.nextActionAt) return;
+  state.npc.nextActionAt = now + 800;
+
+  if (isNpcTrapped()) {
+    killNpc('became trapped underground');
+    return;
+  }
+
+  const dirs = [[0,1],[1,0],[-1,0],[0,-1]];
+  const [dx, dy] = dirs[Math.floor(Math.random() * dirs.length)];
+  const nx = wrapX(state.npc.x + dx);
+  const ny = state.npc.y + dy;
+  if (!inBounds(nx, ny)) return;
+  const m = getCell(nx, ny);
+  const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
+  if (m === MATERIALS.LAVA) {
+    killNpc('entered lava');
+    return;
+  }
+  if (m !== MATERIALS.EMPTY && !canDig(m, direction)) return;
+
+  if (m === MATERIALS.TREASURE || m === MATERIALS.RELIC || m === MATERIALS.CRYSTAL) {
+    const reward = m === MATERIALS.TREASURE ? 55 : m === MATERIALS.RELIC ? 95 : 70;
+    state.money += Math.floor(reward * (state.lootMultiplier || 1));
+    gainXp(12);
+  }
+  if (m !== MATERIALS.EMPTY) {
+    setCell(nx, ny, MATERIALS.EMPTY);
+    state.npc.stamina = Math.max(0, state.npc.stamina - 1);
+  }
+  state.npc.x = nx;
+  state.npc.y = ny;
+  settleColumn(nx);
+  settleSurfaceLandmarks();
 }
 
 /**
@@ -468,6 +785,11 @@ function updateParticles() {
 }
 
 function draw() {
+  const now = performance.now();
+  updateGrassSpread(now);
+  updateLavaFlow(now);
+  updateNpcDigger(now);
+  updateAutoDig(now);
   resizeCanvasToDisplaySize();
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -481,17 +803,29 @@ function draw() {
   const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
-  // Camera centers on the player and only stops centering when we hit map boundaries.
+  // Camera centers on the player; at the surface we allow negative camera Y so the player stays centered.
   state.camera.x = wrapX(state.player.x - Math.floor(viewportCols / 2));
-  state.camera.y = Math.max(0, Math.min(WORLD_HEIGHT - viewportRows, state.player.y - Math.floor(viewportRows / 2)));
+  const targetCameraY = state.player.y - Math.floor(viewportRows / 2);
+  const topSkyRows = Math.max(0, Math.floor(viewportRows / 2) - 1);
+  const minCameraY = -topSkyRows;
+  state.camera.y = Math.max(minCameraY, Math.min(WORLD_HEIGHT - viewportRows, targetCameraY));
 
-  drawSurface(tileSize, viewportCols, offsetX, offsetY);
+  // Auto-rest should begin as soon as the player is idle on cottage with missing stamina.
+  if (isAtCottage() && state.stamina < state.maxStamina && !state.restAction?.active && !state.digAction?.active) startRest();
 
-  const boardGlow = ctx.createLinearGradient(offsetX, offsetY, offsetX, offsetY + boardHeightPx);
-  boardGlow.addColorStop(0, '#24172e');
-  boardGlow.addColorStop(1, '#141622');
-  ctx.fillStyle = boardGlow;
-  ctx.fillRect(offsetX - 2, offsetY - 2, boardWidthPx + 4, boardHeightPx + 4);
+  drawSurface(tileSize, viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx);
+
+  // Apply underground vignette only below the surface horizon so the blue sky stays visible.
+  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx);
+  const undergroundTop = Math.floor(horizon);
+  const undergroundHeight = Math.max(0, (offsetY + boardHeightPx) - undergroundTop);
+  if (undergroundHeight > 0) {
+    const boardGlow = ctx.createLinearGradient(offsetX, undergroundTop, offsetX, offsetY + boardHeightPx);
+    boardGlow.addColorStop(0, 'rgba(36, 23, 46, 0.2)');
+    boardGlow.addColorStop(1, 'rgba(20, 22, 34, 0.78)');
+    ctx.fillStyle = boardGlow;
+    ctx.fillRect(offsetX - 2, undergroundTop - 1, boardWidthPx + 4, undergroundHeight + 3);
+  }
 
   for (let vy = 0; vy < viewportRows; vy += 1) {
     for (let vx = 0; vx < viewportCols; vx += 1) {
@@ -502,13 +836,35 @@ function draw() {
       const material = getCell(wx, wy);
       const px = offsetX + (vx * tileSize);
       const py = offsetY + (vy * tileSize);
+      const isCottageTile = isLandmarkAt(LANDMARK_IDS.COTTAGE, wx, wy);
+      const isShopTile = isLandmarkAt(LANDMARK_IDS.SHOP, wx, wy);
+      const isWellTile = state.waterUnlocked && isLandmarkAt(LANDMARK_IDS.WELL, wx, wy);
+      const transparentSurfaceLane = wy === 0 && material === MATERIALS.EMPTY && !isCottageTile && !isShopTile && !isWellTile;
 
-      ctx.fillStyle = getMaterialColor(material);
-      ctx.fillRect(px, py, tileSize, tileSize);
+      // Keep the y=0 lane transparent so the sky touches the grass with no black separator row.
+      if (!transparentSurfaceLane) {
+        ctx.fillStyle = getMaterialColor(material);
+        ctx.fillRect(px, py, tileSize, tileSize);
+      }
 
-      if (material !== MATERIALS.EMPTY) {
+      if (material !== MATERIALS.EMPTY && !transparentSurfaceLane) {
         ctx.fillStyle = 'rgba(0,0,0,0.18)';
         ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, Math.floor(tileSize * 0.18)));
+      }
+
+      // Overlay landmark icons so cottage/shop remain visible while on the surface lane.
+      if (isCottageTile) {
+        drawSurfaceIconTile(px, py, tileSize, '#8e5a31', '🛖');
+      } else if (isShopTile) {
+        drawSurfaceIconTile(px, py, tileSize, '#366fb0', '🛒');
+      } else if (isWellTile) {
+        drawSurfaceIconTile(px, py, tileSize, '#4d7bb5', '🪣');
+      }
+
+      if (material === MATERIALS.LAVA) {
+        const lavaPulse = (Math.sin((performance.now() / 140) + (wx * 0.4) + (wy * 0.2)) + 1) / 2;
+        ctx.fillStyle = `rgba(255, 208, 84, ${(0.22 + lavaPulse * 0.22).toFixed(3)})`;
+        ctx.fillRect(px + 2, py + 2, Math.max(2, tileSize - 4), Math.max(2, tileSize - 4));
       }
 
       if (material === MATERIALS.TREASURE) {
@@ -518,14 +874,17 @@ function draw() {
         ctx.fillRect(px + Math.floor((tileSize - gemSize) / 2), py + Math.floor((tileSize - gemSize) / 2), gemSize, gemSize);
       }
 
-      const fogAlpha = getFogAlpha(wx, wy);
-      if (fogAlpha > 0) {
-        ctx.fillStyle = `rgba(0, 0, 0, ${fogAlpha.toFixed(3)})`;
-        ctx.fillRect(px, py, tileSize, tileSize);
-      }
+      // Keep the transparent surface lane unobstructed by fog/grid so sky remains continuous.
+      if (!transparentSurfaceLane) {
+        const fogAlpha = getFogAlpha(wx, wy);
+        if (fogAlpha > 0) {
+          ctx.fillStyle = `rgba(0, 0, 0, ${fogAlpha.toFixed(3)})`;
+          ctx.fillRect(px, py, tileSize, tileSize);
+        }
 
-      ctx.strokeStyle = '#131723';
-      ctx.strokeRect(px, py, tileSize, tileSize);
+        ctx.strokeStyle = '#131723';
+        ctx.strokeRect(px, py, tileSize, tileSize);
+      }
     }
   }
 
@@ -542,6 +901,18 @@ function draw() {
     ctx.globalAlpha = Math.max(0, p.life);
     ctx.fillRect(sx, sy, size, size);
     ctx.globalAlpha = 1;
+  }
+
+  if (state.npc.alive) {
+    const npcViewportX = wrapX(state.npc.x - state.camera.x);
+    const npcScreenX = offsetX + (npcViewportX * tileSize);
+    const npcScreenY = offsetY + ((state.npc.y - state.camera.y) * tileSize);
+    ctx.fillStyle = '#6ff0b5';
+    ctx.fillRect(npcScreenX + 2, npcScreenY + 2, Math.max(6, Math.floor(tileSize * 0.65)), Math.max(6, Math.floor(tileSize * 0.65)));
+    ctx.font = `${Math.max(10, Math.floor(tileSize * 0.7))}px Trebuchet MS`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#123221';
+    ctx.fillText('🤖', npcScreenX + Math.floor(tileSize * 0.5), npcScreenY + Math.floor(tileSize * 0.7));
   }
 
   // Convert world X -> viewport X with wrap awareness so edge-crossing never places
@@ -606,6 +977,33 @@ function draw() {
     ctx.stroke();
   }
 
+  // Red warning pulse appears if user tries digging with zero stamina.
+  const staminaWarningActive = performance.now() < state.staminaWarningUntil;
+  if (staminaWarningActive) {
+    const pulse = (Math.sin(performance.now() / 120) + 1) / 2;
+    const warningAlpha = 0.16 + (pulse * 0.2);
+    ctx.fillStyle = `rgba(255, 52, 72, ${warningAlpha.toFixed(3)})`;
+    ctx.fillRect(offsetX, offsetY, boardWidthPx, boardHeightPx);
+
+    ctx.lineWidth = Math.max(4, Math.floor(tileSize * 0.16));
+    ctx.strokeStyle = `rgba(255, 90, 106, ${(0.4 + (pulse * 0.45)).toFixed(3)})`;
+    ctx.strokeRect(offsetX + 2, offsetY + 2, boardWidthPx - 4, boardHeightPx - 4);
+
+    const bannerW = Math.min(boardWidthPx - 30, Math.max(280, Math.floor(boardWidthPx * 0.7)));
+    const bannerH = Math.max(44, Math.floor(tileSize * 2));
+    const bannerX = offsetX + Math.floor((boardWidthPx - bannerW) / 2);
+    const bannerY = offsetY + Math.max(12, Math.floor(tileSize * 0.6));
+    ctx.fillStyle = 'rgba(55, 10, 18, 0.84)';
+    ctx.fillRect(bannerX, bannerY, bannerW, bannerH);
+    ctx.strokeStyle = 'rgba(255, 124, 135, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(bannerX, bannerY, bannerW, bannerH);
+    ctx.fillStyle = '#ffd3d8';
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${Math.max(14, Math.floor(tileSize * 0.8))}px Trebuchet MS`;
+    ctx.fillText('⛔ Out of stamina — return to the 🛖 cottage to rest', bannerX + (bannerW / 2), bannerY + Math.floor(bannerH * 0.64));
+  }
+
   if (state.gameOver) {
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(offsetX, offsetY, boardWidthPx, boardHeightPx);
@@ -616,12 +1014,38 @@ function draw() {
   }
 }
 
+function getLandmark(id) {
+  return state.surfaceLandmarks[id];
+}
+
+function isLandmarkAt(id, x, y) {
+  const landmark = getLandmark(id);
+  return landmark && wrapX(landmark.x) === wrapX(x) && landmark.y === y;
+}
+
+/**
+ * Landmark gravity: cottage/shop should sink when no block supports them below.
+ * This mirrors a heavy rock dropping through empty space.
+ */
+function settleSurfaceLandmarks() {
+  for (const id of Object.values(LANDMARK_IDS)) {
+    if (id === LANDMARK_IDS.WELL && !state.waterUnlocked) continue;
+    const landmark = getLandmark(id);
+    if (!landmark) continue;
+    while (landmark.y < WORLD_HEIGHT - 1 && getCell(landmark.x, landmark.y + 1) === MATERIALS.EMPTY) {
+      landmark.y += 1;
+    }
+  }
+}
+
 function isAtCottage() {
-  return state.player.y === 0 && wrapX(state.player.x) === wrapX(SURFACE_SPOTS.cottageX);
+  const cottage = getLandmark(LANDMARK_IDS.COTTAGE);
+  return state.player.y === cottage.y && wrapX(state.player.x) === wrapX(cottage.x);
 }
 
 function isAtShop() {
-  return state.player.y === 0 && wrapX(state.player.x) === wrapX(SURFACE_SPOTS.shopX);
+  const shop = getLandmark(LANDMARK_IDS.SHOP);
+  return state.player.y === shop.y && wrapX(state.player.x) === wrapX(shop.x);
 }
 
 function canSpendStamina() {
@@ -632,8 +1056,14 @@ function spendStamina(amount = 1) {
   state.stamina = Math.max(0, state.stamina - amount);
 }
 
+/** Trigger a temporary visual warning pulse in the play area for zero-stamina digging attempts. */
+function triggerStaminaWarning() {
+  state.staminaWarningUntil = Math.max(state.staminaWarningUntil, performance.now() + STAMINA_WARNING_MS);
+}
+
 function clearRestAction() {
   if (state.restAction?.timer) clearTimeout(state.restAction.timer);
+  if (state.restAction?.tickTimer) clearInterval(state.restAction.tickTimer);
   state.restAction = null;
 }
 
@@ -641,37 +1071,48 @@ function clearRestAction() {
  * Resting is only allowed inside the cottage tile on the surface.
  * The digger remains responsive (render loop runs) while a 10s timer refills stamina.
  */
-function startRest() {
+function startRest(manual = false) {
   if (state.gameOver || state.digAction?.active) return;
-  if (state.restAction?.active) {
-    setMessage('Already resting in the cottage...', 'good');
-    return;
-  }
+  if (state.restAction?.active) return;
   if (!isAtCottage()) {
-    setMessage('Go to the cottage (🛖) at the surface to rest.', 'danger');
-    playSfx('blocked');
+    if (manual) setMessage('Go to the cottage (🛖) tile to rest.', 'danger');
     return;
   }
   if (state.stamina >= state.maxStamina) {
-    setMessage('Stamina is already full.');
+    if (manual) setMessage('Stamina is already full.');
     return;
   }
 
+  const missing = Math.max(1, state.maxStamina - state.stamina);
+  const tickMs = Math.max(250, Math.floor(REST_DURATION_MS / missing));
   state.restAction = {
     active: true,
     startedAt: performance.now(),
     durationMs: REST_DURATION_MS,
+    tickMs,
     timer: null,
+    tickTimer: null,
   };
-  setMessage('Resting in cottage... 10 seconds to full stamina.');
+  setMessage('Auto-resting in cottage... stamina refilling.', 'good');
   updateHud();
+
+  state.restAction.tickTimer = setInterval(() => {
+    if (!state.restAction?.active) return;
+    state.stamina = Math.min(state.maxStamina, state.stamina + 1);
+    updateHud();
+    if (state.stamina >= state.maxStamina) {
+      clearRestAction();
+      setMessage('Fully rested! Stamina restored.');
+      updateHud();
+    }
+  }, tickMs);
 
   state.restAction.timer = setTimeout(() => {
     state.stamina = state.maxStamina;
     clearRestAction();
     setMessage('Fully rested! Stamina restored.');
     updateHud();
-  }, REST_DURATION_MS);
+  }, REST_DURATION_MS + 120);
 }
 
 function setMessage(msg, tone = 'good') {
@@ -683,6 +1124,22 @@ function xpToNextLevel() {
   return 100 + ((state.level - 1) * 70);
 }
 
+/** Stamina cap scales with level progression so longer digs become possible later on. */
+function recalculateMaxStamina() {
+  const newMax = MAX_STAMINA + Math.floor((state.level - 1) / 2);
+  const previousMax = state.maxStamina;
+  state.maxStamina = newMax;
+  if (newMax > previousMax) state.stamina += (newMax - previousMax);
+  state.stamina = Math.min(state.maxStamina, state.stamina);
+}
+
+function maybeWarnLowStamina(now = performance.now()) {
+  if (state.stamina > 3 || state.restAction?.active) return;
+  if (now - state.lastLowStaminaWarnAt < 4500) return;
+  state.lastLowStaminaWarnAt = now;
+  setMessage('⚠️ Low stamina (3 or less). Head to the cottage to auto-rest soon.', 'danger');
+}
+
 function gainXp(amount) {
   state.xp += amount;
   let didLevelUp = false;
@@ -691,6 +1148,7 @@ function gainXp(amount) {
     state.level += 1;
     state.money += 45;
     didLevelUp = true;
+    recalculateMaxStamina();
     playSfx('levelup');
     setMessage(`Level up! You are now level ${state.level}. +$45 sponsor bonus.`);
   }
@@ -706,15 +1164,40 @@ function updateHud() {
   $('speed').textContent = state.digSpeed.toFixed(2);
   $('bomb-count').textContent = state.bombs;
   $('bombs').textContent = state.bombs;
+  $('water').textContent = state.water;
+  $('water-count').textContent = state.water;
   $('zoom-mode').textContent = state.zoom20x20 ? '20x20' : 'Auto';
   $('stamina').textContent = state.stamina;
   $('stamina-max').textContent = state.maxStamina;
-  $('town-status').textContent = isAtCottage() ? 'At Cottage' : isAtShop() ? 'At Shop' : 'Away';
+  const townStatus = isAtCottage()
+    ? 'At Cottage'
+    : isAtShop()
+      ? 'At Shop'
+      : isAtWell()
+        ? 'At Well'
+        : 'Away';
+  $('town-status').textContent = townStatus;
+  $('npc-status').textContent = !state.npc.owned ? 'None' : state.npc.alive ? 'Digging' : 'Dead';
   $('zoom-btn').textContent = state.zoom20x20 ? '🔍 Zoom: 20x20' : '🔍 Zoom: Auto';
+  $('auto-dig-btn').textContent = state.autoDigEnabled ? '🤖 Auto Dig: On' : '🤖 Auto Dig: Off';
+  $('water-btn').disabled = state.gameOver || (!state.waterUnlocked && !isAtShop()) || state.restAction?.active;
   $('sfx-mode').textContent = state.sfxEnabled ? 'On' : 'Off';
   $('sfx-btn').textContent = state.sfxEnabled ? '🔊 SFX: On' : '🔇 SFX: Off';
   $('status').textContent = state.gameOver ? 'Game Over' : state.restAction?.active ? 'Resting' : 'Active';
-  $('rest-btn').disabled = state.gameOver || state.restAction?.active || !isAtCottage() || state.stamina >= state.maxStamina || !!state.digAction?.active;
+  $('rest-btn').disabled = state.gameOver || !isAtCottage() || state.stamina >= state.maxStamina || !!state.digAction?.active;
+
+  const progressFill = $('rest-progress-fill');
+  const progressText = $('rest-progress-text');
+  if (state.restAction?.active) {
+    const elapsed = performance.now() - state.restAction.startedAt;
+    const progress = Math.min(1, elapsed / state.restAction.durationMs);
+    progressFill.style.width = `${Math.round(progress * 100)}%`;
+    progressText.textContent = `Resting ${Math.round(progress * 100)}%`;
+  } else {
+    progressFill.style.width = state.stamina >= state.maxStamina ? '100%' : '0%';
+    progressText.textContent = state.stamina >= state.maxStamina ? 'Ready' : 'Needs Rest';
+  }
+
   renderShop();
 }
 
@@ -722,6 +1205,8 @@ function canDig(material, direction) {
   if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) return true;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
+  if (material === MATERIALS.GRANITE) return state.canDigRock;
+  if (material === MATERIALS.LAVA) return false;
   return false;
 }
 
@@ -774,7 +1259,9 @@ function digCell(x, y, direction, siteDef) {
 
   if (!canDig(material, direction)) {
     if (material === MATERIALS.ROCK) setMessage('Rock Drill upgrade required for this block.', 'danger');
-    if (material === MATERIALS.METAL || material === MATERIALS.GRANITE) setMessage('Too hard to dig. Use a bomb!', 'danger');
+    if (material === MATERIALS.METAL) setMessage('Too hard to dig. Use a bomb!', 'danger');
+    if (material === MATERIALS.GRANITE) setMessage('Granite needs Rock Drill or bombs.', 'danger');
+    if (material === MATERIALS.LAVA) setMessage('Lava is unpassable. Cool it with water first.', 'danger');
     playSfx('blocked');
     return false;
   }
@@ -789,6 +1276,7 @@ function digCell(x, y, direction, siteDef) {
     playSfx('dig');
     gainXp(7 * siteDef.xpBonus);
     spendStamina(1);
+    maybeWarnLowStamina();
   }
   return true;
 }
@@ -875,6 +1363,9 @@ function completeMove(nx, ny, dy, siteDef) {
 
   settleColumn(nx);
   settleColumn(state.player.x);
+  settleSurfaceLandmarks();
+  if (isAtCottage() && state.stamina < state.maxStamina) startRest();
+  maybeWarnLowStamina();
   updateHud();
   draw();
 
@@ -912,11 +1403,12 @@ function endGameFromTrap() {
 }
 
 function movePlayer(dx, dy) {
-  if (state.gameOver || state.digAction?.active) return;
-  if (state.restAction?.active) {
-    setMessage('You are resting. Wait for stamina to refill.', 'danger');
+  if (!state.gameStarted) {
+    setMessage('Press Start Dig to begin this expedition.', 'danger');
     return;
   }
+  if (state.gameOver || state.digAction?.active) return;
+  if (state.restAction?.active) clearRestAction();
   const now = performance.now();
   if (now - state.lastMoveAt < state.cooldownMs) return;
 
@@ -936,6 +1428,7 @@ function movePlayer(dx, dy) {
   }
 
   if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+    triggerStaminaWarning();
     setMessage('No stamina. Return to the cottage (🛖) and rest for 10s.', 'danger');
     playSfx('blocked');
     updateHud();
@@ -953,7 +1446,91 @@ function movePlayer(dx, dy) {
   beginTimedDig(nx, ny, direction, siteDef);
 }
 
+function autoCanMoveInto(nx, ny, direction) {
+  if (!inBounds(nx, ny)) return false;
+  const material = getCell(nx, ny);
+  if (material === MATERIALS.LAVA) return false;
+  if (material === MATERIALS.EMPTY) return true;
+  return canDig(material, direction);
+}
+
+/** Keep auto-dig conservative: do not move into cells that leave no nearby exits. */
+function autoHasEscapeAt(nx, ny) {
+  const dirs = [
+    { dx: 0, dy: -1, direction: 'up' },
+    { dx: 0, dy: 1, direction: 'down' },
+    { dx: -1, dy: 0, direction: 'side' },
+    { dx: 1, dy: 0, direction: 'side' },
+  ];
+  return dirs.some((d) => {
+    const tx = wrapX(nx + d.dx);
+    const ty = ny + d.dy;
+    return autoCanMoveInto(tx, ty, d.direction);
+  });
+}
+
+function tryAutoMove(dx, dy) {
+  const nx = wrapX(state.player.x + dx);
+  const ny = state.player.y + dy;
+  if (!inBounds(0, ny)) return false;
+  const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
+  if (!autoCanMoveInto(nx, ny, direction)) return false;
+  if (!autoHasEscapeAt(nx, ny)) return false;
+  movePlayer(dx, dy);
+  return true;
+}
+
+function updateAutoDig(now = performance.now()) {
+  if (!state.autoDigEnabled || !state.gameStarted) return;
+  if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
+  if (now - state.lastMoveAt < state.cooldownMs) return;
+
+  const cottage = getLandmark(LANDMARK_IDS.COTTAGE);
+
+  // Safety-first: route home when stamina is low, then auto-rest.
+  if (state.stamina <= 3) {
+    if (isAtCottage()) {
+      startRest();
+      return;
+    }
+    if (state.player.y > cottage.y) {
+      if (tryAutoMove(0, -1)) return;
+    }
+    const step = wrappedStepDirection(state.player.x, cottage.x);
+    if (tryAutoMove(step, 0)) return;
+    if (tryAutoMove(-step, 0)) return;
+    if (tryAutoMove(0, -1)) return;
+    return;
+  }
+
+  // Priority 1: immediately adjacent valuables.
+  const valuableDirs = [
+    { dx: 0, dy: 1, direction: 'down' },
+    { dx: -1, dy: 0, direction: 'side' },
+    { dx: 1, dy: 0, direction: 'side' },
+    { dx: 0, dy: -1, direction: 'up' },
+  ];
+  for (const d of valuableDirs) {
+    const nx = wrapX(state.player.x + d.dx);
+    const ny = state.player.y + d.dy;
+    if (!inBounds(nx, ny)) continue;
+    const material = getCell(nx, ny);
+    if (![MATERIALS.TREASURE, MATERIALS.RELIC, MATERIALS.CRYSTAL].includes(material)) continue;
+    if (tryAutoMove(d.dx, d.dy)) return;
+  }
+
+  // Priority 2: progress deeper safely.
+  if (tryAutoMove(0, 1)) return;
+
+  // Priority 3: carve sideways, then up as last resort.
+  const sideStep = Math.random() < 0.5 ? -1 : 1;
+  if (tryAutoMove(sideStep, 0)) return;
+  if (tryAutoMove(-sideStep, 0)) return;
+  tryAutoMove(0, -1);
+}
+
 function useBomb() {
+  if (!state.gameStarted) return;
   if (state.gameOver || state.digAction?.active || state.restAction?.active) return;
   if (state.bombs <= 0) {
     setMessage('Out of bombs. Buy Bomb Pack in the shop.', 'danger');
@@ -967,11 +1544,14 @@ function useBomb() {
   for (let y = originY - 1; y <= originY + 1; y += 1) {
     for (let x = originX - 1; x <= originX + 1; x += 1) {
       if (!inBounds(x, y)) continue;
+      if (getCell(x, y) === MATERIALS.LAVA) state.lavaSources.delete(lavaKey(x, y));
       setCell(x, y, MATERIALS.EMPTY);
       spawnParticles(x, y, '#ff9466', 8, 1.6);
       settleColumn(x);
     }
   }
+
+  settleSurfaceLandmarks();
 
   state.bombs -= 1;
   gainXp(20);
@@ -984,6 +1564,13 @@ function useBomb() {
 function renderShop() {
   const container = $('shop-items');
   container.innerHTML = '';
+
+  if (!isAtShop()) {
+    const hint = document.createElement('p');
+    hint.className = 'shop-hint';
+    hint.textContent = 'Stand on the 🛒 shop tile to reveal all buy buttons.';
+    container.appendChild(hint);
+  }
 
   upgrades.forEach((upgrade) => {
     const cost = Math.floor(upgrade.baseCost * (1 + ((state.level - 1) * 0.1)));
@@ -998,38 +1585,49 @@ function renderShop() {
     const desc = document.createElement('p');
     desc.textContent = upgrade.desc;
 
-    const btn = document.createElement('button');
-    btn.className = 'btn';
     const atShop = isAtShop();
-    btn.title = levelLocked
-      ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
-      : !atShop
-        ? 'Stand on the surface shop tile (🛒) to buy upgrades'
-        : `Buy ${upgrade.name}`;
-    btn.textContent = 'Buy Upgrade';
-    btn.disabled = state.money < cost || levelLocked || state.gameOver || !atShop;
-    btn.addEventListener('click', () => {
-      if (state.money < cost || levelLocked || state.gameOver) return;
-      if (!isAtShop()) {
-        setMessage('Go to the surface shop tile (🛒) to buy upgrades.', 'danger');
-        playSfx('blocked');
-        return;
-      }
-      state.money -= cost;
-      if (upgrade.id === 'bomb-pack') state.bombs += state.bombPackBonus || 0;
-      upgrade.apply();
-      setMessage(`${upgrade.name} purchased.`);
-      updateHud();
-      draw();
-    });
+    const alreadyOwned = upgrade.oneTime && upgrade.isOwned?.();
+    const customBlocked = upgrade.canBuy && !upgrade.canBuy();
 
-    box.append(name, desc, btn);
+    box.append(name, desc);
+
+    // Hard-hide purchase controls unless the player is physically on the shop tile.
+    if (atShop) {
+      const btn = document.createElement('button');
+      btn.className = 'btn';
+      btn.title = levelLocked
+        ? `Reach level ${upgrade.requiredLevel} to unlock ${upgrade.name}`
+        : alreadyOwned
+          ? `${upgrade.name} already unlocked`
+          : customBlocked
+            ? `Cannot buy ${upgrade.name} right now`
+            : `Buy ${upgrade.name}`;
+      btn.textContent = alreadyOwned ? 'Owned' : 'Buy Upgrade';
+      btn.disabled = state.money < cost || levelLocked || state.gameOver || alreadyOwned || customBlocked;
+      btn.addEventListener('click', () => {
+        if (state.money < cost || levelLocked || state.gameOver || alreadyOwned || customBlocked) return;
+        if (!isAtShop()) {
+          setMessage('Go to the surface shop tile (🛒) to buy upgrades.', 'danger');
+          playSfx('blocked');
+          return;
+        }
+        state.money -= cost;
+        if (upgrade.id === 'bomb-pack') state.bombs += state.bombPackBonus || 0;
+        upgrade.apply();
+        setMessage(`${upgrade.name} purchased.`);
+        updateHud();
+        draw();
+      });
+      box.append(btn);
+    }
     container.appendChild(box);
   });
 }
 
 function startSelectedSite() {
   const siteDef = SITE_DEFS.find((site) => site.id === state.selectedSiteId);
+  state.gameStarted = true;
+  $('site-select-wrap').classList.add('is-hidden');
   setMessage('Generating 200x1000 looping world...');
 
   setTimeout(() => {
@@ -1037,16 +1635,32 @@ function startSelectedSite() {
     state.explored = new Uint8Array(WORLD_WIDTH * WORLD_HEIGHT);
     state.player = { x: Math.floor(WORLD_WIDTH / 2), y: 0 };
     state.camera = { x: 0, y: 0 };
+    state.surfaceLandmarks = {
+      [LANDMARK_IDS.COTTAGE]: { x: SURFACE_SPOTS.cottageX, y: 0 },
+      [LANDMARK_IDS.SHOP]: { x: SURFACE_SPOTS.shopX, y: 0 },
+      [LANDMARK_IDS.WELL]: { x: SURFACE_SPOTS.shopX + 1, y: 0 },
+    };
     state.maxDepth = 0;
     state.gameOver = false;
     state.bombPackBonus = 0;
     state.lootMultiplier = 1;
+    state.waterUnlocked = false;
+    state.water = 0;
+    state.lastLavaFlowAt = 0;
+    state.npc = { owned: false, alive: false, x: 0, y: 0, stamina: 8, maxStamina: 8, nextActionAt: 0, restUntil: 0 };
+    state.autoDigEnabled = false;
     if (state.digAction?.sfxTimer) clearInterval(state.digAction.sfxTimer);
     if (state.digAction?.dustTimer) clearInterval(state.digAction.dustTimer);
     if (state.digAction?.doneTimer) clearTimeout(state.digAction.doneTimer);
     state.digAction = null;
     state.particles = [];
+    state.maxStamina = MAX_STAMINA;
     state.stamina = state.maxStamina;
+    recalculateMaxStamina();
+    state.staminaWarningUntil = 0;
+    state.lastLowStaminaWarnAt = 0;
+    state.lastGrassSpreadAt = 0;
+    initLavaSourcesFromWorld();
     clearRestAction();
     markVisibleArea(state.player.x, state.player.y);
     setMessage(`Expedition active at ${siteDef.name}. Dig down and get rich!`);
@@ -1065,7 +1679,7 @@ function bindUi() {
 
   siteSelect.addEventListener('change', (event) => {
     state.selectedSiteId = event.target.value;
-    startSelectedSite();
+    setMessage(`Site selected: ${SITE_DEFS.find((site) => site.id === state.selectedSiteId).name}. Press Start Dig.`);
   });
 
   $('start-btn').addEventListener('click', startSelectedSite);
@@ -1075,7 +1689,17 @@ function bindUi() {
     updateHud();
     draw();
   });
-  $('rest-btn').addEventListener('click', startRest);
+  $('rest-btn').addEventListener('click', () => startRest(true));
+  $('water-btn').addEventListener('click', useWater);
+  $('auto-dig-btn').addEventListener('click', () => {
+    if (!state.gameStarted) {
+      setMessage('Press Start Dig before enabling auto-dig.', 'danger');
+      return;
+    }
+    state.autoDigEnabled = !state.autoDigEnabled;
+    setMessage(state.autoDigEnabled ? 'Auto-dig enabled.' : 'Auto-dig disabled.');
+    updateHud();
+  });
   $('sfx-btn').addEventListener('click', () => {
     state.sfxEnabled = !state.sfxEnabled;
     updateHud();
@@ -1100,7 +1724,8 @@ function bindUi() {
       updateHud();
       draw();
     }
-    if (key === 'r') startRest();
+    if (key === 'r') startRest(true);
+    if (key === 'q') useWater();
     if (key === 'm') {
       state.sfxEnabled = !state.sfxEnabled;
       updateHud();
@@ -1118,4 +1743,6 @@ function bindUi() {
 }
 
 bindUi();
-startSelectedSite();
+setMessage('Choose a site, then press Start Dig to begin.');
+updateHud();
+draw();
