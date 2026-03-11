@@ -560,19 +560,19 @@ function resizeCanvasToDisplaySize() {
  * Shared surface horizon math so both the sky painter and underground vignette
  * agree on where "above-ground" ends in screen space.
  */
-function getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx) {
+function getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx, cameraY = state.camera.y) {
   const boardTop = offsetY;
   const boardBottom = offsetY + boardHeightPx;
   // Lock horizon directly to the grass row so there is no dark gap between sky and ground.
-  const grassRowScreenY = offsetY + ((1 - state.camera.y) * tileSize);
+  const grassRowScreenY = offsetY + ((1 - cameraY) * tileSize);
   return Math.max(boardTop, Math.min(boardBottom, grassRowScreenY));
 }
 
-function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx) {
+function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx, cameraY = state.camera.y) {
   // Draw sky/soil inside the board bounds so the terrain and background start at the same point.
   const boardTop = offsetY;
   const boardBottom = offsetY + boardHeightPx;
-  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx);
+  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx, cameraY);
 
   const sky = ctx.createLinearGradient(0, boardTop, 0, horizon || (boardTop + 1));
   // Brighter daytime sky palette for a clearer above-ground mood.
@@ -936,20 +936,32 @@ function draw() {
   const offsetX = Math.floor((canvas.width - boardWidthPx) / 2);
   const offsetY = Math.floor((canvas.height - boardHeightPx) / 2);
 
-  // Camera centers on the player; at the surface we allow negative camera Y so the player stays centered.
-  state.camera.x = wrapX(animatedPlayer.x - Math.floor(viewportCols / 2));
+  // Camera centers on the player; keep tile sampling on integer rows/cols and apply sub-tile pixel offsets.
+  // This preserves smooth scrolling without feeding fractional world indices into terrain lookups.
+  const cameraFloatX = animatedPlayer.x - Math.floor(viewportCols / 2);
+  const cameraTileX = Math.floor(cameraFloatX);
+  const cameraSubX = cameraFloatX - cameraTileX;
+  state.camera.x = wrapX(cameraTileX);
+
   const targetCameraY = animatedPlayer.y - Math.floor(viewportRows / 2);
   const topSkyRows = Math.max(0, Math.floor(viewportRows / 2) - 1);
   const minCameraY = -topSkyRows;
-  state.camera.y = Math.max(minCameraY, Math.min(WORLD_HEIGHT - viewportRows, targetCameraY));
+  const maxCameraY = WORLD_HEIGHT - viewportRows;
+  const cameraFloatY = Math.max(minCameraY, Math.min(maxCameraY, targetCameraY));
+  const cameraTileY = Math.floor(cameraFloatY);
+  const cameraSubY = cameraFloatY - cameraTileY;
+  state.camera.y = cameraTileY;
+
+  const cameraRenderX = wrapX(state.camera.x + cameraSubX);
+  const cameraRenderY = state.camera.y + cameraSubY;
 
   // Auto-rest should begin as soon as the player is idle on cottage with missing stamina.
   if (isAtCottage() && state.stamina < state.maxStamina && !state.restAction?.active && !state.digAction?.active) startRest();
 
-  drawSurface(tileSize, viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx);
+  drawSurface(tileSize, viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx, cameraRenderY);
 
   // Apply underground vignette only below the surface horizon so the blue sky stays visible.
-  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx);
+  const horizon = getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx, cameraRenderY);
   const undergroundTop = Math.floor(horizon);
   const undergroundHeight = Math.max(0, (offsetY + boardHeightPx) - undergroundTop);
   if (undergroundHeight > 0) {
@@ -967,8 +979,8 @@ function draw() {
       if (!inBounds(wx, wy)) continue;
 
       const material = getCell(wx, wy);
-      const px = offsetX + (vx * tileSize);
-      const py = offsetY + (vy * tileSize);
+      const px = offsetX + Math.round((vx - cameraSubX) * tileSize);
+      const py = offsetY + Math.round((vy - cameraSubY) * tileSize);
       const isCottageTile = isLandmarkAt(LANDMARK_IDS.COTTAGE, wx, wy);
       const isShopTile = isLandmarkAt(LANDMARK_IDS.SHOP, wx, wy);
       const isWellTile = state.waterUnlocked && isLandmarkAt(LANDMARK_IDS.WELL, wx, wy);
@@ -1037,8 +1049,8 @@ function draw() {
 
   updateParticles();
   for (const p of state.particles) {
-    const sx = offsetX + ((p.x - state.camera.x) * tileSize);
-    const sy = offsetY + ((p.y - state.camera.y) * tileSize);
+    const sx = offsetX + (wrapX(p.x - cameraRenderX) * tileSize);
+    const sy = offsetY + ((p.y - cameraRenderY) * tileSize);
     const size = Math.max(1, Math.floor(tileSize * p.size));
     // Draw a dark offset shadow first so bright debris remains readable on all block colors.
     ctx.fillStyle = 'rgba(12, 8, 18, 0.45)';
@@ -1051,9 +1063,9 @@ function draw() {
   }
 
   if (state.npc.alive) {
-    const npcViewportX = wrapX(state.npc.x - state.camera.x);
+    const npcViewportX = wrapX(state.npc.x - cameraRenderX);
     const npcScreenX = offsetX + (npcViewportX * tileSize);
-    const npcScreenY = offsetY + ((state.npc.y - state.camera.y) * tileSize);
+    const npcScreenY = offsetY + ((state.npc.y - cameraRenderY) * tileSize);
     ctx.fillStyle = '#6ff0b5';
     ctx.fillRect(npcScreenX + 2, npcScreenY + 2, Math.max(6, Math.floor(tileSize * 0.65)), Math.max(6, Math.floor(tileSize * 0.65)));
     ctx.font = `${Math.max(10, Math.floor(tileSize * 0.7))}px Trebuchet MS`;
@@ -1064,9 +1076,9 @@ function draw() {
 
   // Convert world X -> viewport X with wrap awareness so edge-crossing never places
   // the player sprite off-screen when camera.x wrapped to the other side.
-  const playerViewportX = wrapX(animatedPlayer.x - state.camera.x);
+  const playerViewportX = wrapX(animatedPlayer.x - cameraRenderX);
   const playerScreenX = offsetX + (playerViewportX * tileSize);
-  const playerScreenY = offsetY + ((animatedPlayer.y - state.camera.y) * tileSize);
+  const playerScreenY = offsetY + ((animatedPlayer.y - cameraRenderY) * tileSize);
   const bob = Math.sin(state.playerAnim.bobPhase) * Math.max(1, tileSize * 0.05);
   const px = playerScreenX;
   const py = playerScreenY + bob;
@@ -1309,8 +1321,11 @@ function placeSelectedTile(dropOnly = false) {
   if (!state.inventory[material]) { setMessage('No units of that tile left.', 'danger'); return; }
   const target = getPlacementTarget();
   if (!target) return;
-  if (getCell(target.tx, target.ty) !== MATERIALS.EMPTY) {
-    setMessage('Placement target must be empty.', 'danger');
+  const targetMaterial = getCell(target.tx, target.ty);
+  // Struts may replace sand in-place so players can reinforce a collapsing lane quickly.
+  const canReplaceSandWithStrut = material === MATERIALS.STRUT && targetMaterial === MATERIALS.SAND;
+  if (targetMaterial !== MATERIALS.EMPTY && !canReplaceSandWithStrut) {
+    setMessage('Placement target must be empty (struts can replace sand).', 'danger');
     return;
   }
   if (!dropOnly && !state.buildMode) {
@@ -1476,8 +1491,14 @@ function updateHud() {
   renderShop();
 }
 
+/** Struts are structural braces: pass-through for movement but block gravity/digging. */
+function isPassThroughMaterial(material) {
+  return material === MATERIALS.EMPTY || material === MATERIALS.STRUT;
+}
+
 function canDig(material, direction) {
-  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE, MATERIALS.STRUT, MATERIALS.TORCH].includes(material)) return true;
+  if ([MATERIALS.EMPTY, MATERIALS.SAND, MATERIALS.TREASURE, MATERIALS.GRASS, MATERIALS.RELIC, MATERIALS.CRYSTAL, MATERIALS.GOLD, MATERIALS.DIAMOND, MATERIALS.RUBY, MATERIALS.EMERALD, MATERIALS.SAPPHIRE, MATERIALS.GEMSTONE, MATERIALS.TORCH].includes(material)) return true;
+  if (material === MATERIALS.STRUT) return false;
   if (material === MATERIALS.ROCK && direction === 'side' && state.canDigPillars) return true;
   if (material === MATERIALS.ROCK) return state.canDigRock;
   if (material === MATERIALS.GRANITE) return state.canDigRock;
@@ -1489,7 +1510,7 @@ function settleColumn(x) {
   const wx = wrapX(x);
   for (let y = WORLD_HEIGHT - 2; y >= 0; y -= 1) {
     const curr = getCell(wx, y);
-    if (curr === MATERIALS.EMPTY) continue;
+    if (curr === MATERIALS.EMPTY || curr === MATERIALS.STRUT) continue;
     if (getCell(wx, y + 1) === MATERIALS.EMPTY) {
       setCell(wx, y + 1, curr);
       setCell(wx, y, MATERIALS.EMPTY);
@@ -1549,6 +1570,7 @@ function digCell(x, y, direction, siteDef) {
     if (material === MATERIALS.METAL) setMessage('Too hard to dig. Use a bomb!', 'danger');
     if (material === MATERIALS.GRANITE) setMessage('Granite needs Rock Drill or bombs.', 'danger');
     if (material === MATERIALS.LAVA) setMessage('Lava is unpassable. Cool it with water first.', 'danger');
+    if (material === MATERIALS.STRUT) setMessage('Placed struts are permanent supports and cannot be mined.', 'danger');
     playSfx('blocked');
     return false;
   }
@@ -1684,7 +1706,7 @@ function isTrapped() {
     const ny = state.player.y + dir.dy;
     if (!inBounds(nx, ny)) return false;
     const material = getCell(nx, ny);
-    return canDig(material, dir.name) || material === MATERIALS.EMPTY || material === MATERIALS.TREASURE;
+    return canDig(material, dir.name) || isPassThroughMaterial(material) || material === MATERIALS.TREASURE;
   });
 }
 
@@ -1715,14 +1737,14 @@ function movePlayer(dx, dy) {
   const direction = dy > 0 ? 'down' : dy < 0 ? 'up' : 'side';
   const targetMaterial = getCell(nx, ny);
 
-  // Pure movement into empty space stays instant (no 3-second dig action).
-  if (targetMaterial === MATERIALS.EMPTY) {
+  // Pure movement into pass-through cells stays instant (no 3-second dig action).
+  if (isPassThroughMaterial(targetMaterial)) {
     state.lastMoveAt = now;
     completeMove(nx, ny, dy, siteDef);
     return;
   }
 
-  if (targetMaterial !== MATERIALS.EMPTY && !canSpendStamina()) {
+  if (!isPassThroughMaterial(targetMaterial) && !canSpendStamina()) {
     // Emergency movement rule: with zero stamina, upward movement through loose sand is allowed.
     if (direction === 'up' && targetMaterial === MATERIALS.SAND) {
       setCell(nx, ny, MATERIALS.EMPTY);
@@ -1752,7 +1774,7 @@ function autoCanMoveInto(nx, ny, direction) {
   if (!inBounds(nx, ny)) return false;
   const material = getCell(nx, ny);
   if (material === MATERIALS.LAVA) return false;
-  if (material === MATERIALS.EMPTY) return true;
+  if (isPassThroughMaterial(material)) return true;
   return canDig(material, direction);
 }
 
@@ -1847,7 +1869,9 @@ function useBomb() {
   for (let y = originY - 1; y <= originY + 1; y += 1) {
     for (let x = originX - 1; x <= originX + 1; x += 1) {
       if (!inBounds(x, y)) continue;
-      if (getCell(x, y) === MATERIALS.LAVA) state.lavaSources.delete(lavaKey(x, y));
+      const cell = getCell(x, y);
+      if (cell === MATERIALS.STRUT) continue;
+      if (cell === MATERIALS.LAVA) state.lavaSources.delete(lavaKey(x, y));
       setCell(x, y, MATERIALS.EMPTY);
       spawnParticles(x, y, '#ff9466', 8, 1.6);
       settleColumn(x);
