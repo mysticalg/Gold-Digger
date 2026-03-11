@@ -361,13 +361,9 @@ function resizeCanvasToDisplaySize() {
 function getSurfaceHorizonScreenY(tileSize, offsetY, boardHeightPx) {
   const boardTop = offsetY;
   const boardBottom = offsetY + boardHeightPx;
+  // Lock horizon directly to the grass row so there is no dark gap between sky and ground.
   const grassRowScreenY = offsetY + ((1 - state.camera.y) * tileSize);
-  const surfaceSkyHorizon = offsetY + Math.floor(boardHeightPx * 0.5);
-  const useSurfaceSkyView = state.player.y <= 1;
-  const rawHorizon = useSurfaceSkyView
-    ? Math.max(grassRowScreenY, surfaceSkyHorizon)
-    : grassRowScreenY;
-  return Math.max(boardTop, Math.min(boardBottom, rawHorizon));
+  return Math.max(boardTop, Math.min(boardBottom, grassRowScreenY));
 }
 
 function drawSurface(tileSize, _viewportCols, offsetX, offsetY, boardWidthPx, boardHeightPx) {
