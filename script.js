@@ -362,17 +362,30 @@ function drawSurface() {
   ctx.fillRect(0, horizon - 10, canvas.width, 10);
 }
 
-/** Particle bursts make digs, treasure, and bombs feel responsive. */
-function spawnParticles(worldX, worldY, color, count = 8, force = 1) {
+/**
+ * Particle bursts make digs, treasure, and bombs feel responsive.
+ * If an origin point is provided, particles can fly opposite the dig direction.
+ */
+function spawnParticles(worldX, worldY, color, count = 8, force = 1, originX = null, originY = null, reverseFromOrigin = false) {
+  const baseX = originX == null ? 0 : worldX - originX;
+  const baseY = originY == null ? -1 : worldY - originY;
+  const directionScale = reverseFromOrigin ? -1 : 1;
+  const travelX = baseX * directionScale;
+  const travelY = baseY * directionScale;
+  const travelLength = Math.hypot(travelX, travelY) || 1;
+  const dirX = travelX / travelLength;
+  const dirY = travelY / travelLength;
+
   for (let i = 0; i < count; i += 1) {
+    const sprayStrength = 0.1 + (Math.random() * 0.08);
     state.particles.push({
       x: worldX + 0.5,
       y: worldY + 0.5,
-      vx: (Math.random() - 0.5) * 0.16 * force,
-      vy: (-Math.random() * 0.16) * force,
+      vx: (((Math.random() - 0.5) * 0.1) + (dirX * sprayStrength)) * force,
+      vy: (((Math.random() - 0.5) * 0.08) + (dirY * sprayStrength)) * force,
       life: 1,
       color,
-      size: 0.12 + Math.random() * 0.2,
+      size: 0.16 + Math.random() * 0.16,
     });
   }
 }
@@ -386,18 +399,23 @@ function spawnDigDustBurst(action) {
   const material = getCell(action.targetX, action.targetY);
   if (material === MATERIALS.EMPTY) return;
 
-  // Push the dust away from the miner so the spray direction matches the shovel swing.
-  const sprayDir = state.playerAnim.facing > 0 ? 1 : -1;
-  const count = 2 + Math.floor(Math.random() * 3);
+  // Push the dust opposite the dig direction so debris kicks back toward the miner.
+  const towardX = state.player.x - action.targetX;
+  const towardY = state.player.y - action.targetY;
+  const length = Math.hypot(towardX, towardY) || 1;
+  const dirX = towardX / length;
+  const dirY = towardY / length;
+  const count = 3 + Math.floor(Math.random() * 3);
   for (let i = 0; i < count; i += 1) {
+    const speed = 0.08 + (Math.random() * 0.12);
     state.particles.push({
       x: action.targetX + 0.5 + ((Math.random() - 0.5) * 0.5),
       y: action.targetY + 0.35 + (Math.random() * 0.35),
-      vx: ((0.02 + Math.random() * 0.08) * sprayDir) + ((Math.random() - 0.5) * 0.03),
-      vy: -(0.03 + Math.random() * 0.1),
-      life: 0.65 + (Math.random() * 0.25),
+      vx: (dirX * speed) + ((Math.random() - 0.5) * 0.05),
+      vy: (dirY * speed) + ((Math.random() - 0.5) * 0.05),
+      life: 0.75 + (Math.random() * 0.3),
       color: getMaterialColor(material),
-      size: 0.09 + Math.random() * 0.1,
+      size: 0.13 + Math.random() * 0.12,
     });
   }
 }
@@ -480,6 +498,10 @@ function draw() {
     const sx = offsetX + ((p.x - state.camera.x) * tileSize);
     const sy = offsetY + ((p.y - state.camera.y) * tileSize);
     const size = Math.max(1, Math.floor(tileSize * p.size));
+    // Draw a dark offset shadow first so bright debris remains readable on all block colors.
+    ctx.fillStyle = 'rgba(12, 8, 18, 0.45)';
+    ctx.globalAlpha = Math.max(0, p.life * 0.9);
+    ctx.fillRect(sx + 1, sy + 1, size, size);
     ctx.fillStyle = p.color;
     ctx.globalAlpha = Math.max(0, p.life);
     ctx.fillRect(sx, sy, size, size);
@@ -664,7 +686,8 @@ function digCell(x, y, direction, siteDef) {
   if (material === MATERIALS.CRYSTAL) collectCrystal(siteDef, x, y);
   if (material !== MATERIALS.EMPTY) {
     setCell(x, y, MATERIALS.EMPTY);
-    spawnParticles(x, y, getMaterialColor(material), 6, 0.8);
+    // Reverse origin spray so chunks kick back opposite the current dig direction.
+    spawnParticles(x, y, getMaterialColor(material), 8, 1.05, state.player.x, state.player.y, true);
     playSfx('dig');
     gainXp(7 * siteDef.xpBonus);
   }
