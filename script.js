@@ -4,7 +4,8 @@
  * - Camera-follow rendering (only visible tiles are drawn for speed)
  * - Arcade digging, gravity, upgrades, bombs, and site difficulty
  */
-const WORLD_WIDTH = 200;
+// Level 1 is intentionally compact (50 columns) so wrap-around is easy to understand.
+const WORLD_WIDTH = 50;
 const WORLD_HEIGHT = 1000;
 const TILE_SIZE = 16;
 const FOW_SIGHT_RADIUS = 5;
@@ -485,7 +486,10 @@ function draw() {
     ctx.globalAlpha = 1;
   }
 
-  const playerScreenX = offsetX + ((state.player.x - state.camera.x) * tileSize);
+  // Convert world X -> viewport X with wrap awareness so edge-crossing never places
+  // the player sprite off-screen when camera.x wrapped to the other side.
+  const playerViewportX = wrapX(state.player.x - state.camera.x);
+  const playerScreenX = offsetX + (playerViewportX * tileSize);
   const playerScreenY = offsetY + ((state.player.y - state.camera.y) * tileSize);
   const bob = Math.sin(state.playerAnim.bobPhase) * Math.max(1, tileSize * 0.05);
   const px = playerScreenX;
