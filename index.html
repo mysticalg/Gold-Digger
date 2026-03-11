@@ -24,6 +24,7 @@
       <button id="rest-btn" class="btn" title="Rest at your cottage for 10 seconds to refill stamina">🛖 Rest</button>
       <button id="water-btn" class="btn" title="Collect water at the well or splash it near lava">💧 Water (<span id="water-count">0</span>)</button>
       <button id="sfx-btn" class="btn" title="Toggle retro sound effects">🔊 SFX: On</button>
+      <button id="cheat-btn" class="btn" title="Enable testing mode with unlocked equipment and resources">🧪 Cheat: Off</button>
       <button id="help-btn" class="btn" title="Show game tips and controls">❓ Help</button>
     </section>
 
@@ -41,6 +42,9 @@
       <div class="stat" title="Cottage, shop, and well access at landmark tiles">🏘️ <span id="town-status">Away</span></div>
       <div class="stat" title="Status of your hired NPC digger">🤖 <span id="npc-status">None</span></div>
       <div class="stat" title="Whether sound effects are enabled">🔊 <span id="sfx-mode">On</span></div>
+      <div class="stat" title="Placement mode for building underground bases">🧱 Build <span id="build-mode">Off</span></div>
+      <div class="stat" title="Currently selected placeable tile">🎯 <span id="build-tile">None</span></div>
+      <div class="stat" title="Whether cheat mode is active">🧪 <span id="cheat-mode">Off</span></div>
       <div class="stat" title="Game state status">🎮 <span id="status">Active</span></div>
     </section>
 
@@ -55,6 +59,17 @@
         <p class="shop-hint">Find treasure, upgrade tools, survive deeper layers.</p>
         <button id="auto-dig-btn" class="btn" title="Toggle automatic safe treasure hunting and auto-return to cottage">🤖 Auto Dig: Off</button>
         <div id="shop-items"></div>
+      </aside>
+
+      <aside class="inventory" aria-label="Inventory and building controls">
+        <h2>🎒 Inventory & Build</h2>
+        <p class="shop-hint">Dig materials to stock inventory. Sell, drop, or place tiles to build caverns and bases.</p>
+        <div class="inventory-controls">
+          <button id="sell-btn" class="btn" title="Sell everything in your inventory for money">💰 Sell Inventory</button>
+          <button id="build-btn" class="btn" title="Toggle build mode and place selected tile with E">🧱 Build: Off</button>
+          <button id="drop-btn" class="btn" title="Drop one selected inventory tile into the target cell">🗑️ Drop Selected</button>
+        </div>
+        <div id="inventory-list" class="inventory-list" aria-live="polite"></div>
       </aside>
     </section>
 
@@ -76,6 +91,9 @@
       <li>Collect water at the <strong>🪣 well</strong> (next to the shop) and splash it on lava to convert lava into <strong>granite</strong>.</li>
       <li>Lava pockets can leak if containment breaks; lava is unpassable and dangerous.</li>
       <li>Press <kbd>M</kbd> to toggle sound effects.</li>
+      <li>Press <kbd>B</kbd> to toggle build mode, <kbd>E</kbd> to place selected tile, and <kbd>C</kbd> to cycle placeable inventory tiles.</li>
+      <li>Torches and struts can be bought in the shop and placed underground to light caverns and support excavations.</li>
+      <li>Use Cheat Mode for testing: unlocks upgrades, fast dig, infinite money, stamina, bombs, and water.</li>
       <li>Fog-of-war reveals only a smooth <strong>5-block</strong> sight radius; distant/unexplored cells fade to black.</li>
       <li>Press <kbd>Z</kbd> to toggle a fixed <strong>20x20</strong> zoomed play-area view (now default on start).</li>
       <li>If you are fully trapped by unbreakable rock/metal/granite with no bombs left, it is <strong>game over</strong>.</li>
