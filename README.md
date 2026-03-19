@@ -38,3 +38,8 @@ python3 -m http.server 4173
 ```
 
 Then open: `http://127.0.0.1:4173`
+
+## Support
+
+If you'd like to support this project, you can buy me a coffee:
+[buymeacoffee.com/dhooksterm](https://buymeacoffee.com/dhooksterm)
